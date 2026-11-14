@@ -4,7 +4,6 @@
 import logging
 import shlex
 
-logging.basicConfig(filename='bip_emulator.log', level=logging.DEBUG)
 logger = logging.getLogger('bip-emulator')
 
 from time import time
@@ -19,9 +18,11 @@ import asyncio
 import sys
 import threading
 import argparse
+import curses
+import curses.textpad
 
 refresh_event = asyncio.Event()
-sc = Smartcard(refresh_event=refresh_event)
+sc = Smartcard(refresh_event=refresh_event, reader=2)
 sc.connect()
 
 USIM_AID = bytes.fromhex('A0000000871002')
@@ -906,7 +907,7 @@ def get_euicc_info(cla, is_sgp32=False):
     tags = parse_tags(es10x(sc, cla, bytes.fromhex('BF3E035C015A'), max_command_data=max_command_data))
     eid = tags[b'\xbf\x3e'][0][b'\x5a'][0].hex().upper()
     logger.info('EID: %s', eid)
-    print('EID:', eid)
+    # print('EID:', eid)
 
     tags = parse_tags(es10x(sc, cla, bytes.fromhex('BF2200'), max_command_data=max_command_data))[b'\xbf\x22'][0]
     profile_version = '.'.join(map(str, tags[b'\x81'][0]))
@@ -924,31 +925,31 @@ def get_euicc_info(cla, is_sgp32=False):
         fallback_allowed_update_supported = b'\x83' in tags[b'\xb4'][0]
 
     logger.info('SGP.22 version: %s', sgp22_version)
-    print('SGP.22 version:', sgp22_version)
+    # print('SGP.22 version:', sgp22_version)
     logger.info('Base eUICC Profile package version: %s', profile_version)
-    print('Base eUICC Profile package version:', profile_version)
+    # print('Base eUICC Profile package version:', profile_version)
     logger.info('eUICC firmware version: %s', fw_version)
-    print('eUICC firmware version:', fw_version)
+    # print('eUICC firmware version:', fw_version)
     logger.info('ETSI TS 102 241 (UICC API for JavaCard) version: %s', ts102241_version)
-    print('ETSI TS 102 241 (UICC API for JavaCard) version:', ts102241_version)
+    # print('ETSI TS 102 241 (UICC API for JavaCard) version:', ts102241_version)
     logger.info('eUICC category: %s', category)
-    print('eUICC category:', category)
+    # print('eUICC category:', category)
     logger.info('Profile protection version: %s', pp_version)
-    print('Profile protection version:', pp_version)
+    # print('Profile protection version:', pp_version)
     logger.info('SAS accreditation number: %s', sas_accreditation_number)
-    print('SAS accreditation number:', sas_accreditation_number)
+    # print('SAS accreditation number:', sas_accreditation_number)
     if is_sgp32:
-        print()
+        # print()
         # logger.info('IPA mode: %s', ipa_mode)
         # print('IPA mode:', ipa_mode)
         logger.info('SGP.32 version: %s', sgp32_version)
-        print('SGP.32 version:', sgp32_version)
+        # print('SGP.32 version:', sgp32_version)
         logger.info('Emergency call supported: %s', ecall_supported)
-        print('Emergency call supported:', ecall_supported)
+        # print('Emergency call supported:', ecall_supported)
         logger.info('Fallback mechanism supported: %s', fallback_supported)
-        print('Fallback mechanism supported:', fallback_supported)
+        # print('Fallback mechanism supported:', fallback_supported)
         logger.info('Support for update of the Fallback Allowed metadata via ES6: %s', fallback_allowed_update_supported)
-        print('Support for update of the Fallback Allowed metadata via ES6:', fallback_allowed_update_supported)
+        # print('Support for update of the Fallback Allowed metadata via ES6:', fallback_allowed_update_supported)
 
 
 def enable_ipae(cla):
@@ -972,10 +973,10 @@ def select_isd_r(cla) -> bool:
 
     if not sgp32:
         logger.warning('No SGP.32 support')
-        print('No SGP.32 support')
+        # print('No SGP.32 support')
     else:
         logger.info('SGP.32 eUICC')
-        print('SGP.32 eUICC')
+        # print('SGP.32 eUICC')
 
         bitstring = fci[b'\x6F'][0][b'\xE1'][0][b'\x80'][0]
         unused_bits = bitstring[0]
@@ -986,8 +987,8 @@ def select_isd_r(cla) -> bool:
         logger.info('IPAe supported: %s', ipae_supported)
         logger.info('Profile enabled: %s', profile_enabled)
 
-        print('IPAe supported:', ipae_supported)
-        print('Profile enabled:', profile_enabled)
+        # print('IPAe supported:', ipae_supported)
+        # print('Profile enabled:', profile_enabled)
 
     return sgp32
 
@@ -995,7 +996,7 @@ def select_isd_r(cla) -> bool:
 def get_ipae_version(cla):
     ipae_version = sc.transmit(cla=cla|0x80, ins=0xCA, p1=0x00, p2=0x01, le=0x00)
     logger.info('IPAe version: %s', '.'.join(map(str, ipae_version)))
-    print('IPAe version:', '.'.join(map(str, ipae_version)))
+    # print('IPAe version:', '.'.join(map(str, ipae_version)))
 
 
 def select_ipae(cla):
@@ -1012,26 +1013,61 @@ cli_line_processed_event = threading.Event()
 cli_line_available_event = asyncio.Event()
 is_thales = False
 
+def validate(ch: int|str):
+    if ch == curses.KEY_PPAGE:
+        cursor = editscreen.getyx()
+        screen.scroll(1)
+        editscreen.move(*cursor)
+        editscreen.noutrefresh()
+        screen.noutrefresh()
+        curses.doupdate()
+        return None
+    elif ch == curses.KEY_NPAGE:
+        cursor = editscreen.getyx()
+        screen.scroll(-1)
+        editscreen.move(*cursor)
+        editscreen.noutrefresh()
+        screen.noutrefresh()
+        curses.doupdate()
+        return None
+    else:
+        return ch
+
 def cli_input_thread(loop: asyncio.AbstractEventLoop):
     global cli_line
     while True:
-        cli_line = input('$ ')
+        cli_line = textinput.edit(validate=validate)
+        editscreen.move(0, 0)
+        editscreen.clear()
+        editscreen.refresh()
         loop.call_soon_threadsafe(cli_line_available_event.set)
         cli_line_processed_event.wait()
         cli_line_processed_event.clear()
 
 
+def print_screen(*args):
+     assert screen is not None
+     cursor = editscreen.getyx()
+     screen.addstr(' '.join(map(str, args)) + '\n')
+     editscreen.move(*cursor)
+     screen.noutrefresh()
+     editscreen.noutrefresh()
+     curses.doupdate()
+
+
 async def cli():
     global service
 
-    cli_parser = argparse.ArgumentParser(prog='', description='cli', exit_on_error=False, add_help=False)
+    cli_parser = argparse.ArgumentParser(prog='', description='cli', exit_on_error=False, add_help=False, color=False)
     subparsers = cli_parser.add_subparsers(dest='command')
-    help_parser = subparsers.add_parser('help')
-    network_parser = subparsers.add_parser('network')
-    poll_parser = subparsers.add_parser('poll', help='Force polling on a Thales eUICC')
+    help_parser = subparsers.add_parser('help', add_help=False, exit_on_error=False, color=False)
+    network_parser = subparsers.add_parser('network', add_help=False, exit_on_error=False, color=False)
+    network_parser.add_argument('-h', '--help', action='store_true')
+    poll_parser = subparsers.add_parser('poll', help='Force polling on a Thales eUICC', add_help=False, exit_on_error=False, color=False)
+    poll_parser.add_argument('-h', '--help', action='store_true')
     network_subparsers = network_parser.add_subparsers(dest='network_command')
-    network_subparsers.add_parser('disconnect')
-    network_subparsers.add_parser('connect')
+    network_subparsers.add_parser('disconnect', add_help=False, exit_on_error=False, color=False)
+    network_subparsers.add_parser('connect', add_help=False, exit_on_error=False, color=False)
     while True:
         await cli_line_available_event.wait()
         cli_line_available_event.clear()
@@ -1039,58 +1075,64 @@ async def cli():
         try:
             args = cli_parser.parse_args(shlex.split(cli_line))
         except (argparse.ArgumentError, argparse.ArgumentTypeError) as e:
-            print(e, file=sys.stderr)
+            print_screen(e)
         except SystemExit:
             pass  # help was printed
         else:
             match args.command:
                 case 'help':
-                    cli_parser.print_help()
+                    print_screen(cli_parser.format_help())
                 case 'network':
-                    match args.network_command:
-                        case 'disconnect':
-                            if not service:
-                                print('Already disconnected')
-                            else:
-                                print('Disconnecting from network')
-                                await waiting_for_refresh.wait()
-                                service = False
-                                update_location_no_service()
-                                if Event.LOCATION_STATUS in requested_event_list:
-                                    logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
-                                    data = bytearray()
-                                    data += EventList((Event.LOCATION_STATUS,), cr=True)
-                                    data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
-                                    data += LocationStatus(status=0x02, cr=True)  # No service
-                                    sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
-                                else:
-                                    logger.warning('SIM did not set up Location status in the event list')
-                        case 'connect':
-                            if service:
-                                print('Already connected')
-                            else:
-                                print('Connecting to network')
-                                await waiting_for_refresh.wait()
-                                service = True
-                                update_location_info(location)
-                                if Event.LOCATION_STATUS in requested_event_list:
-                                    logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
-                                    data = bytearray()
-                                    data += EventList((Event.LOCATION_STATUS,), cr=True)
-                                    data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
-                                    data += LocationStatus(status=0x00, cr=True)  # Service available
-                                    data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci, cr=True)  # E-UTRAN
-                                    sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
-                                else:
-                                    logger.warning('SIM did not set up Location status in the event list')
-                case 'poll':
-                    if not is_thales:
-                        print('Not a Thales eUICC')
+                    if args.help:
+                        print_screen(network_parser.format_help())
                     else:
-                        if force_polling(cla_ipae):
-                            print('Force polling success')
+                        match args.network_command:
+                            case 'disconnect':
+                                if not service:
+                                    print_screen('Already disconnected')
+                                else:
+                                    print_screen('Disconnecting from network')
+                                    await waiting_for_refresh.wait()
+                                    service = False
+                                    update_location_no_service()
+                                    if Event.LOCATION_STATUS in requested_event_list:
+                                        logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
+                                        data = bytearray()
+                                        data += EventList((Event.LOCATION_STATUS,), cr=True)
+                                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
+                                        data += LocationStatus(status=0x02, cr=True)  # No service
+                                        sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
+                                    else:
+                                        logger.warning('SIM did not set up Location status in the event list')
+                            case 'connect':
+                                if service:
+                                    print_screen('Already connected')
+                                else:
+                                    print_screen('Connecting to network')
+                                    await waiting_for_refresh.wait()
+                                    service = True
+                                    update_location_info(location)
+                                    if Event.LOCATION_STATUS in requested_event_list:
+                                        logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
+                                        data = bytearray()
+                                        data += EventList((Event.LOCATION_STATUS,), cr=True)
+                                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
+                                        data += LocationStatus(status=0x00, cr=True)  # Service available
+                                        data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci, cr=True)  # E-UTRAN
+                                        sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
+                                    else:
+                                        logger.warning('SIM did not set up Location status in the event list')
+                case 'poll':
+                    if args.help:
+                        print_screen(poll_parser.format_help())
+                    else:
+                        if not is_thales:
+                            print_screen('Not a Thales eUICC')
                         else:
-                            print('Force polling failed; APDU polling is disabled or the IPAe is busy')
+                            if force_polling(cla_ipae):
+                                print_screen('Force polling success')
+                            else:
+                                print_screen('Force polling failed; APDU polling is disabled or the IPAe is busy')
 
         cli_line_processed_event.set()
 
@@ -1111,7 +1153,7 @@ async def main():
         try:
             select_ipae(cla_ipae)  # Thales only
             logger.info('Thales SIM detected')
-            print('Thales SIM detected')
+            # print('Thales SIM detected')
             is_thales = True
             get_ipae_version(cla_ipae)
         except APDUException:
@@ -1119,7 +1161,6 @@ async def main():
 
     except APDUException:
         logger.error('SIM does not appear to be a SGP.32 eUICC')
-        print('SIM does not appear to be a eUICC')
 
     select_usim()
     update_location_info(location)
@@ -1151,44 +1192,67 @@ def exc_handler(loop, context):
     logger.error('Exception: %s', context['message'], **kw)
     loop.default_exception_handler(context)
 
-#
-# def run_main(stdscr: curses.window):
-#     stdscr.clear()
-#     stdscr.idlok(True)
-#     stdscr.scrollok(True)
-#
-#     class TerminalIO(io.RawIOBase):
-#         def write(self, b):
-#             stdscr.addstr(bytes(b).decode('utf-8'))
-#             stdscr.refresh()
-#             return len(b)
-#
-#         def writable(self) -> bool:
-#             return True
-#
-#         def writelines(self, lines) -> None:
-#             self.write(b''.join(lines))
-#
-#         def seekable(self) -> bool:
-#             return False
-#
-#         def readable(self) -> bool:
-#             return False
-#
-#         def isatty(self) -> bool:
-#             return True
-#
-#         def flush(self):
-#             stdscr.refresh()
-#
-#         def fileno(self) -> int:
-#             return 1
-#
-#     tio = TerminalIO()
-#     writer = io.BufferedWriter(tio)
-#     wrapper = io.TextIOWrapper(writer, encoding='utf-8', newline='\n', line_buffering=True, write_through=True)
-#     sys.stdout = sys.stderr = wrapper
 
-asyncio.run(main(), debug=True)
+screen: curses.window|None = None
+editscreen: curses.window|None = None
+textinput: curses.textpad.Textbox|None = None
 
-# curses.wrapper(run_main)
+def run_main(stdscr: curses.window):
+    global screen
+    global textinput
+    global editscreen
+
+    # screen = stdscr.subwin((2*curses.LINES)//3, curses.COLS, 0, 0)
+    screen = stdscr.subwin(curses.LINES - 5, curses.COLS, 0, 0)
+    screen.clear()
+    screen.idlok(True)
+    screen.scrollok(True)
+    screen.leaveok(True)
+    #
+    # stdscr.hline((2*curses.LINES)//3, 0, curses.ACS_HLINE, curses.COLS)
+    stdscr.hline(curses.LINES - 5, 0, curses.ACS_HLINE, curses.COLS)
+    # editscreen = stdscr.subwin(curses.LINES - (2*curses.LINES)//3 - 1, curses.COLS, (2*curses.LINES)//3 + 1, 0)
+    editscreen = stdscr.subwin(4, curses.COLS, curses.LINES - 4, 0)
+    editscreen.clear()
+    editscreen.idlok(True)
+    # editscreen.move(0, 0)
+    # editscreen.cursyncup()
+
+    # screen.idlok(True)
+    # screen.scrollok(True)
+
+    class Textbox(curses.textpad.Textbox):
+        def do_command(self, ch: str | int) -> int:
+            if ch == ord('\n'):
+                return 0
+            else:
+                return super().do_command(ch)
+
+    textinput = Textbox(editscreen, insert_mode=True)
+    # stdscr.move(*editscreen.getbegyx())
+    # stdscr.refresh()
+    editscreen.move(0, 0)
+    editscreen.noutrefresh()
+    screen.noutrefresh()
+    stdscr.noutrefresh()
+    curses.doupdate()
+
+    class TerminalIO:
+        def write(self, data: str) -> int:
+            cursor = editscreen.getyx()
+            screen.addstr(data)
+            editscreen.move(*cursor)
+            return len(data)
+
+        def flush(self):
+            # editscreen.move(0, 0)
+            screen.noutrefresh()
+            editscreen.noutrefresh()
+            curses.doupdate()
+
+    # logging.basicConfig(filename='bip_emulator.log', level=logging.DEBUG)
+    logging.basicConfig(stream=TerminalIO(), level=logging.DEBUG)
+
+    asyncio.run(main(), debug=True)
+
+curses.wrapper(run_main)
