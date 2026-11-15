@@ -20,6 +20,7 @@ import threading
 import argparse
 import curses
 import curses.textpad
+import os
 
 refresh_event = asyncio.Event()
 sc = Smartcard(refresh_event=refresh_event, reader=2)
@@ -907,7 +908,6 @@ def get_euicc_info(cla, is_sgp32=False):
     tags = parse_tags(es10x(sc, cla, bytes.fromhex('BF3E035C015A'), max_command_data=max_command_data))
     eid = tags[b'\xbf\x3e'][0][b'\x5a'][0].hex().upper()
     logger.info('EID: %s', eid)
-    # print('EID:', eid)
 
     tags = parse_tags(es10x(sc, cla, bytes.fromhex('BF2200'), max_command_data=max_command_data))[b'\xbf\x22'][0]
     profile_version = '.'.join(map(str, tags[b'\x81'][0]))
@@ -925,31 +925,17 @@ def get_euicc_info(cla, is_sgp32=False):
         fallback_allowed_update_supported = b'\x83' in tags[b'\xb4'][0]
 
     logger.info('SGP.22 version: %s', sgp22_version)
-    # print('SGP.22 version:', sgp22_version)
     logger.info('Base eUICC Profile package version: %s', profile_version)
-    # print('Base eUICC Profile package version:', profile_version)
     logger.info('eUICC firmware version: %s', fw_version)
-    # print('eUICC firmware version:', fw_version)
     logger.info('ETSI TS 102 241 (UICC API for JavaCard) version: %s', ts102241_version)
-    # print('ETSI TS 102 241 (UICC API for JavaCard) version:', ts102241_version)
     logger.info('eUICC category: %s', category)
-    # print('eUICC category:', category)
     logger.info('Profile protection version: %s', pp_version)
-    # print('Profile protection version:', pp_version)
     logger.info('SAS accreditation number: %s', sas_accreditation_number)
-    # print('SAS accreditation number:', sas_accreditation_number)
     if is_sgp32:
-        # print()
-        # logger.info('IPA mode: %s', ipa_mode)
-        # print('IPA mode:', ipa_mode)
         logger.info('SGP.32 version: %s', sgp32_version)
-        # print('SGP.32 version:', sgp32_version)
         logger.info('Emergency call supported: %s', ecall_supported)
-        # print('Emergency call supported:', ecall_supported)
         logger.info('Fallback mechanism supported: %s', fallback_supported)
-        # print('Fallback mechanism supported:', fallback_supported)
         logger.info('Support for update of the Fallback Allowed metadata via ES6: %s', fallback_allowed_update_supported)
-        # print('Support for update of the Fallback Allowed metadata via ES6:', fallback_allowed_update_supported)
 
 
 def enable_ipae(cla):
@@ -973,10 +959,8 @@ def select_isd_r(cla) -> bool:
 
     if not sgp32:
         logger.warning('No SGP.32 support')
-        # print('No SGP.32 support')
     else:
         logger.info('SGP.32 eUICC')
-        # print('SGP.32 eUICC')
 
         bitstring = fci[b'\x6F'][0][b'\xE1'][0][b'\x80'][0]
         unused_bits = bitstring[0]
@@ -987,16 +971,12 @@ def select_isd_r(cla) -> bool:
         logger.info('IPAe supported: %s', ipae_supported)
         logger.info('Profile enabled: %s', profile_enabled)
 
-        # print('IPAe supported:', ipae_supported)
-        # print('Profile enabled:', profile_enabled)
-
     return sgp32
 
 
 def get_ipae_version(cla):
     ipae_version = sc.transmit(cla=cla|0x80, ins=0xCA, p1=0x00, p2=0x01, le=0x00)
     logger.info('IPAe version: %s', '.'.join(map(str, ipae_version)))
-    # print('IPAe version:', '.'.join(map(str, ipae_version)))
 
 
 def select_ipae(cla):
@@ -1008,35 +988,61 @@ def send_terminal_capability():
     sc.transmit(cla=0x80, ins=0xAA, p1=0x00, p2=0x00, data=bytes.fromhex('A903840101'))
 
 
+PGUP_PGDOWN_LINES = 10
+SCROLLBACK = 2000
+PROMPT_LINES = 6
+
 cli_line: str|None = None
 cli_line_processed_event = threading.Event()
 cli_line_available_event = asyncio.Event()
 is_thales = False
+last_line = 0
+currently_scrolling = False
+
+def move_up_by(n: int):
+    global pad_scroll, currently_scrolling
+    cursor = editscreen.getyx()
+    pad_scroll = max(0, pad_scroll - n)
+    if not (pad_scroll == last_line - (curses.LINES - PROMPT_LINES - 1) or last_line < curses.LINES - PROMPT_LINES - 1):
+        currently_scrolling = True
+    editscreen.move(*cursor)
+    flush_screen()
+
+
+def move_down_by(n: int):
+    global pad_scroll, currently_scrolling
+    cursor = editscreen.getyx()
+    pad_scroll = min(last_line - (curses.LINES - PROMPT_LINES - 1), pad_scroll + n)
+    if pad_scroll == last_line - (curses.LINES - PROMPT_LINES - 1) or last_line < curses.LINES - PROMPT_LINES - 1:
+        currently_scrolling = False
+    editscreen.move(*cursor)
+    flush_screen()
+
 
 def validate(ch: int|str):
+    global pad_scroll, currently_scrolling
     if ch == curses.KEY_PPAGE:
-        cursor = editscreen.getyx()
-        screen.scroll(1)
-        editscreen.move(*cursor)
-        editscreen.noutrefresh()
-        screen.noutrefresh()
-        curses.doupdate()
+        move_up_by(PGUP_PGDOWN_LINES)
         return None
     elif ch == curses.KEY_NPAGE:
-        cursor = editscreen.getyx()
-        screen.scroll(-1)
-        editscreen.move(*cursor)
-        editscreen.noutrefresh()
-        screen.noutrefresh()
-        curses.doupdate()
+        move_down_by(PGUP_PGDOWN_LINES)
+        return None
+    elif ch == curses.KEY_UP:
+        move_up_by(1)
+        return None
+    elif ch == curses.KEY_DOWN:
+        move_down_by(1)
         return None
     else:
         return ch
+
 
 def cli_input_thread(loop: asyncio.AbstractEventLoop):
     global cli_line
     while True:
         cli_line = textinput.edit(validate=validate)
+        if cli_line.strip() == 'exit':
+            return
         editscreen.move(0, 0)
         editscreen.clear()
         editscreen.refresh()
@@ -1045,29 +1051,42 @@ def cli_input_thread(loop: asyncio.AbstractEventLoop):
         cli_line_processed_event.clear()
 
 
-def print_screen(*args):
-     assert screen is not None
-     cursor = editscreen.getyx()
-     screen.addstr(' '.join(map(str, args)) + '\n')
-     editscreen.move(*cursor)
-     screen.noutrefresh()
-     editscreen.noutrefresh()
-     curses.doupdate()
+# TODO: add lock for the screen
+def flush_screen():
+    screen.noutrefresh(pad_scroll, 0, 0, 0, curses.LINES - PROMPT_LINES - 2, curses.COLS)
+    editscreen.noutrefresh()
+    curses.doupdate()
 
+
+def print_screen(*args, end='\n', flush=True):
+    global last_line, pad_scroll
+    assert screen is not None
+    cursor = editscreen.getyx()
+    screen.addstr(' '.join(map(str, args)) + end)
+    coords = screen.getyx()
+    last_line = coords[0]
+    if not currently_scrolling and last_line >= curses.LINES - PROMPT_LINES - 1:
+        pad_scroll = last_line - (curses.LINES - PROMPT_LINES - 1)
+    editscreen.move(*cursor)
+
+    if flush:
+        flush_screen()
 
 async def cli():
     global service
 
-    cli_parser = argparse.ArgumentParser(prog='', description='cli', exit_on_error=False, add_help=False, color=False)
+    cli_parser = argparse.ArgumentParser(prog='', description='Modem emulator', exit_on_error=False, add_help=False, color=False)
     subparsers = cli_parser.add_subparsers(dest='command')
-    help_parser = subparsers.add_parser('help', add_help=False, exit_on_error=False, color=False)
-    network_parser = subparsers.add_parser('network', add_help=False, exit_on_error=False, color=False)
+    exit_parser = subparsers.add_parser('exit', add_help=False, exit_on_error=False, color=False, help='Exit the program')
+    help_parser = subparsers.add_parser('help', add_help=False, exit_on_error=False, color=False, help='Get this message')
+    network_parser = subparsers.add_parser('network', add_help=False, exit_on_error=False, color=False, help='Manage the network')
     network_parser.add_argument('-h', '--help', action='store_true')
     poll_parser = subparsers.add_parser('poll', help='Force polling on a Thales eUICC', add_help=False, exit_on_error=False, color=False)
     poll_parser.add_argument('-h', '--help', action='store_true')
     network_subparsers = network_parser.add_subparsers(dest='network_command')
-    network_subparsers.add_parser('disconnect', add_help=False, exit_on_error=False, color=False)
-    network_subparsers.add_parser('connect', add_help=False, exit_on_error=False, color=False)
+    network_subparsers.add_parser('disconnect', add_help=False, exit_on_error=False, color=False, help='Disconnect from the network')
+    network_subparsers.add_parser('connect', add_help=False, exit_on_error=False, color=False, help='Connect to the network')
+    network_subparsers.add_parser('status', add_help=False, exit_on_error=False, color=False, help='Get the current network status')
     while True:
         await cli_line_available_event.wait()
         cli_line_available_event.clear()
@@ -1081,12 +1100,21 @@ async def cli():
         else:
             match args.command:
                 case 'help':
-                    print_screen(cli_parser.format_help())
+                    print_screen(cli_parser.format_help(), end='')
+                case 'exit':
+                    return
                 case 'network':
                     if args.help:
-                        print_screen(network_parser.format_help())
+                        print_screen(network_parser.format_help(), end='')
                     else:
                         match args.network_command:
+                            case 'status':
+                                if service:
+                                    print_screen('Connected to the network')
+                                else:
+                                    print_screen('Disconnected from the network')
+                                print_screen('IMEI:', imei)
+                                print_screen('Operator:', location.mcc, location.mnc)
                             case 'disconnect':
                                 if not service:
                                     print_screen('Already disconnected')
@@ -1124,7 +1152,7 @@ async def cli():
                                         logger.warning('SIM did not set up Location status in the event list')
                 case 'poll':
                     if args.help:
-                        print_screen(poll_parser.format_help())
+                        print_screen(poll_parser.format_help(), end='')
                     else:
                         if not is_thales:
                             print_screen('Not a Thales eUICC')
@@ -1153,7 +1181,6 @@ async def main():
         try:
             select_ipae(cla_ipae)  # Thales only
             logger.info('Thales SIM detected')
-            # print('Thales SIM detected')
             is_thales = True
             get_ipae_version(cla_ipae)
         except APDUException:
@@ -1175,13 +1202,17 @@ async def main():
         logger.warning('Card did not set up a poll interval! Using 30s as default')
         negotiated_poll_interval = 30
 
-    polling_task = poll()
-    refresh_task = do_refresh()
-    cli_input_task = asyncio.create_task(asyncio.to_thread(cli_input_thread, asyncio.get_running_loop()))
-    cli_process_task = cli()
-    # force_polling_task = force_polling(cla_ipae)  # Thales only
 
-    await asyncio.gather(polling_task, refresh_task, cli_input_task, cli_process_task)#, force_polling_task)
+    # async with asyncio.TaskGroup() as tg:
+    polling_task = asyncio.create_task(poll())
+    refresh_task = asyncio.create_task(do_refresh())
+    cli_process_task = asyncio.create_task(cli())
+    cli_input_task = asyncio.create_task(asyncio.to_thread(cli_input_thread, asyncio.get_running_loop()))
+
+    done, pending = await asyncio.wait((polling_task, refresh_task, cli_input_task, cli_process_task), return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+
 
 
 def exc_handler(loop, context):
@@ -1196,30 +1227,25 @@ def exc_handler(loop, context):
 screen: curses.window|None = None
 editscreen: curses.window|None = None
 textinput: curses.textpad.Textbox|None = None
+pad_scroll = 0
 
 def run_main(stdscr: curses.window):
     global screen
     global textinput
     global editscreen
 
-    # screen = stdscr.subwin((2*curses.LINES)//3, curses.COLS, 0, 0)
-    screen = stdscr.subwin(curses.LINES - 5, curses.COLS, 0, 0)
+    screen = curses.newpad(SCROLLBACK, curses.COLS)
     screen.clear()
     screen.idlok(True)
     screen.scrollok(True)
     screen.leaveok(True)
-    #
-    # stdscr.hline((2*curses.LINES)//3, 0, curses.ACS_HLINE, curses.COLS)
-    stdscr.hline(curses.LINES - 5, 0, curses.ACS_HLINE, curses.COLS)
-    # editscreen = stdscr.subwin(curses.LINES - (2*curses.LINES)//3 - 1, curses.COLS, (2*curses.LINES)//3 + 1, 0)
-    editscreen = stdscr.subwin(4, curses.COLS, curses.LINES - 4, 0)
+
+    stdscr.hline(curses.LINES - PROMPT_LINES - 1, 0, curses.ACS_HLINE, curses.COLS)
+    border_window = stdscr.subwin(PROMPT_LINES, curses.COLS, curses.LINES - PROMPT_LINES, 0)
+    border_window.border()
+    editscreen = stdscr.subwin(PROMPT_LINES-2, curses.COLS-2, curses.LINES - PROMPT_LINES + 1, 1)
     editscreen.clear()
     editscreen.idlok(True)
-    # editscreen.move(0, 0)
-    # editscreen.cursyncup()
-
-    # screen.idlok(True)
-    # screen.scrollok(True)
 
     class Textbox(curses.textpad.Textbox):
         def do_command(self, ch: str | int) -> int:
@@ -1229,30 +1255,22 @@ def run_main(stdscr: curses.window):
                 return super().do_command(ch)
 
     textinput = Textbox(editscreen, insert_mode=True)
-    # stdscr.move(*editscreen.getbegyx())
-    # stdscr.refresh()
     editscreen.move(0, 0)
-    editscreen.noutrefresh()
-    screen.noutrefresh()
     stdscr.noutrefresh()
-    curses.doupdate()
+    border_window.noutrefresh()
+    flush_screen()
 
     class TerminalIO:
         def write(self, data: str) -> int:
-            cursor = editscreen.getyx()
-            screen.addstr(data)
-            editscreen.move(*cursor)
+            print_screen(data, end='', flush=False)
             return len(data)
 
         def flush(self):
-            # editscreen.move(0, 0)
-            screen.noutrefresh()
-            editscreen.noutrefresh()
-            curses.doupdate()
+            flush_screen()
 
-    # logging.basicConfig(filename='bip_emulator.log', level=logging.DEBUG)
     logging.basicConfig(stream=TerminalIO(), level=logging.DEBUG)
 
-    asyncio.run(main(), debug=True)
+    asyncio.run(main(), debug=False)
 
 curses.wrapper(run_main)
+os._exit(0)
