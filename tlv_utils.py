@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # coding: utf-8
-from typing import Self, Literal
+
+import sys
+from typing import Self
+import io
 
 
 def parse_tag(x: bytes, i: int) -> tuple[int, bytes, int, bool, int]:
@@ -76,7 +79,7 @@ def parse_tags(data):
     return out
 
 
-def dump_tags(data: dict|bytes|bytearray, indent=0):
+def dump_tags(data: dict|bytes|bytearray, indent=0, output=sys.stdout):
     if not isinstance(data, dict):
         data = parse_tags(data)
     for k, v in data.items():
@@ -84,10 +87,18 @@ def dump_tags(data: dict|bytes|bytearray, indent=0):
             v = [v]
         for x in v:
             if isinstance(x, dict):
-                print(indent * '  ' + k.hex())
-                dump_tags(x, indent=indent+1)
+                print(indent * '  ' + k.hex(), file=output)
+                dump_tags(x, indent=indent+1, output=output)
             else:
-                print(indent * '  ' + k.hex() + ' ' + x.hex())
+                print(indent * '  ' + k.hex() + ' ' + x.hex(), file=output)
+
+
+def format_tags(data: dict|bytes|bytearray, indent=0) -> str:
+    output = io.StringIO()
+    dump_tags(data, indent=indent, output=output)
+    contents = output.getvalue()
+    output.close()
+    return contents
 
 
 def encode_tlv(t, v):

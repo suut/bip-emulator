@@ -3,15 +3,16 @@
 
 import logging
 import shlex
+from dataclasses import dataclass
 
 logger = logging.getLogger('bip-emulator')
 
 from time import time
 import socket
 
-from enum import IntEnum
+from enum import IntEnum, Enum, auto
 
-from tlv_utils import parse_tag, parse_tags, parse_length, parse_comprehension_tlv_tag, encode_tlv, CTLV
+from tlv_utils import parse_tag, parse_tags, parse_length, parse_comprehension_tlv_tag, encode_tlv, CTLV, format_tags
 from smartcard_utils import APDUException, Smartcard, es10x
 
 import asyncio
@@ -115,7 +116,28 @@ InterfaceTransportLevel = CTLV.make_type('InterfaceTransportLevel', 0x3C, False,
 OtherAddress = CTLV.make_type('OtherAddress', 0x3E, False, {'address_type': (0, 1, int), 'address': (1, ..., bytes)})  # type: ignore
 LocationStatus = CTLV.make_type('LocationStatus', 0x1B, True, {'status': (0, 1, int)})  # type: ignore
 
-class Location:
+class NetworkType(Enum):
+    disconnected = auto()
+    geran = auto()
+    utran = auto()
+    eutran = auto()
+    ngran = auto()
+
+
+network_type = NetworkType.eutran
+
+network_friendly_names = {
+    NetworkType.disconnected: 'Disconnected',
+    NetworkType.geran: '2G',
+    NetworkType.utran: '3G',
+    NetworkType.eutran: '4G',
+    NetworkType.ngran: '5G'
+}
+
+has_5g = False
+
+
+class EUTRANLocation:
     def __init__(self,
                  mcc: str,
                  mnc: str,
@@ -169,16 +191,15 @@ args = parser.parse_args()
 if args.network != '4G':
     raise NotImplementedError(f'Network {args.network} not implemented yet')
 
-location = Location(args.mcc, args.mnc)
+location = EUTRANLocation(args.mcc, args.mnc)
 imei = args.imei
-service = True
 
 
 def select_usim():
     sc.transmit(cla=0x00, ins=0xA4, p1=0x04, p2=0x00, data=USIM_AID, le=0)
 
 
-def update_location_info(loc: Location):
+def update_location_info(loc: EUTRANLocation):
     # Zero out EF.LOCI
     sc.transmit(cla=0x00, ins=0xA4, p1=0x00, p2=0x04, data=EF_LOCI, le=0x00)
     sc.transmit(cla=0x00, ins=0xD6, p1=0x00, p2=0x00, data=bytes.fromhex('FFFFFFFFFFFFFFFFFFFF01'))
@@ -515,6 +536,17 @@ class TCPChannel(Channel):
         self.task = asyncio.create_task(self.run_task())
 
 
+def close_all_tasks():
+    global negotiated_poll_interval
+    for i, channel in enumerate(channels):
+        if channel is not None:
+            channel.close()
+            channels[i] = None
+    for timer in timers.values():
+        timer.stop_timer()
+    timers.clear()
+    requested_event_list.clear()
+    negotiated_poll_interval = None
 
 timers: dict[int, Timer] = {}
 requested_event_list: list[int] = []
@@ -553,6 +585,9 @@ class TagsDict(dict):
             super().__setitem__(key.TAG, value)
         else:
             super().__setitem__(key, value)
+
+
+card_reset_event = asyncio.Event()
 
 
 def process_proactive_command(ret: bytes):
@@ -615,7 +650,7 @@ def process_proactive_command(ret: bytes):
                         data = bytearray()
                         data += tags[CommandDetails]
                         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                        if service:
+                        if network_type is NetworkType.eutran:
                             data += Result(result=RES_SUCCESS)
                             data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci)  # E-UTRAN
                         else:
@@ -826,8 +861,9 @@ def process_proactive_command(ret: bytes):
                 data += ChannelDataLength(bytes((min(255, remaining),)))
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.REFRESH:
-                logger.info('Processing command REFRESH')
-                sys.exit(0)  # TODO
+                logger.info('Processing REFRESH')
+                card_reset_event.set()
+                # TODO: send code, check if the refresh is type 04
             case cmd:
                 logger.warning(f'unknown proactive command {cmd:02X}')
                 raise CommandTypeNotUnderstood()
@@ -897,14 +933,17 @@ def open_logical_channel() -> int:
         raise ValueError('Invalid logical channel number')
     return cla
 
-
+has_iot_specific_metadata_support = False
 euicc_categories = ['other', 'basicEuicc', 'mediumEuicc', 'contactlessEuicc']
 ipa_modes = ['IPAd', 'IPAe']
 
-def get_euicc_info(cla, is_sgp32=False):
+def get_euicc_info(cla):
     """
     ISD-R must be selected
     """
+
+    global has_iot_specific_metadata_support
+
     tags = parse_tags(es10x(sc, cla, bytes.fromhex('BF3E035C015A'), max_command_data=max_command_data))
     eid = tags[b'\xbf\x3e'][0][b'\x5a'][0].hex().upper()
     logger.info('EID: %s', eid)
@@ -913,10 +952,17 @@ def get_euicc_info(cla, is_sgp32=False):
     profile_version = '.'.join(map(str, tags[b'\x81'][0]))
     sgp22_version = '.'.join(map(str, tags[b'\x82'][0]))
     fw_version = '.'.join(map(str, tags[b'\x83'][0]))
+    global_platform_version = '.'.join(map(str, tags[b'\x87'][0])) if b'\x87' in tags else None
     ts102241_version = '.'.join(map(str, tags[b'\x86'][0])) if b'\x86' in tags else None
     category = euicc_categories[tags[b'\x8B'][0][0]] if b'\x8B' in tags else None
     pp_version = '.'.join(map(str, tags[b'\x04'][0]))
     sas_accreditation_number = tags[b'\x0C'][0].decode('utf-8')
+    rsp_capabilities_raw = tags[b'\x88'][0]
+
+    unused_bits = rsp_capabilities_raw[0]
+    bitstring = '{:b}'.format(int.from_bytes(rsp_capabilities_raw[1:], byteorder='big') >> unused_bits).ljust(29, '0')
+    logger.info('rsp_capabilities: %s', rsp_capabilities_raw.hex())
+
     if is_sgp32:
         ipa_mode = ipa_modes[tags[b'\x90'][0][0]]
         sgp32_version = ', '.join('.'.join(map(str, ver)) for ver in tags[b'\xb4'][0][b'\xa0'][0][b'\x04'])
@@ -928,6 +974,7 @@ def get_euicc_info(cla, is_sgp32=False):
     logger.info('Base eUICC Profile package version: %s', profile_version)
     logger.info('eUICC firmware version: %s', fw_version)
     logger.info('ETSI TS 102 241 (UICC API for JavaCard) version: %s', ts102241_version)
+    logger.info('GlobalPlatform version: %s', global_platform_version)
     logger.info('eUICC category: %s', category)
     logger.info('Profile protection version: %s', pp_version)
     logger.info('SAS accreditation number: %s', sas_accreditation_number)
@@ -937,6 +984,18 @@ def get_euicc_info(cla, is_sgp32=False):
         logger.info('Fallback mechanism supported: %s', fallback_supported)
         logger.info('Support for update of the Fallback Allowed metadata via ES6: %s', fallback_allowed_update_supported)
 
+    logger.info('At least one more profile can be installed: %s', bitstring[0])
+    logger.info('CRL support: %s', bitstring[1])
+    logger.info('Remote profile management support: %s', bitstring[2])
+    logger.info('Test profile support: %s', bitstring[3])
+    logger.info('Support for ASN.1 extensibility in the Device Info: %s', bitstring[4])
+    logger.info('Support for Service Specific Data in the Profile Metadata: %s', bitstring[5])
+    logger.info('Support for eUICC OS Update: %s', bitstring[19])
+    logger.info('Support for SGP.32 iotSpecificMetadata and iotSpecificProfileInfo: %s', bitstring[26])
+    logger.info('Support for eUICC Minimum Security Level Check: %s', bitstring[27])
+    logger.info('Support for RSP Server Test Profile Allow-list Check: %s', bitstring[28])
+
+    has_iot_specific_metadata_support = bitstring[26] == '1'
 
 def enable_ipae(cla):
     """
@@ -988,6 +1047,113 @@ def send_terminal_capability():
     sc.transmit(cla=0x80, ins=0xAA, p1=0x00, p2=0x00, data=bytes.fromhex('A903840101'))
 
 
+def parse_iccid(iccid: bytes) -> str:
+    return ''.join(f'{x:02X}'[::-1] for x in iccid).rstrip('F')
+
+
+result_codes = {0: 'ok', 1: 'ICCID not found', 2: 'Profile not in disabled state', 3: 'Disallowed by policy',
+                4: 'Wrong profile re-enabling', 5: 'CAT busy', 127: 'undefined error'}
+
+def switch_profile(cla: int, iccid: bytes):
+    data = bytearray()
+    data += encode_tlv(b'\x5A', iccid)
+    data += encode_tlv(b'\x80', b'\xFF')  # refreshFlag
+    if is_sgp32:
+        data = encode_tlv(b'\xA0', data)  # Only works with Thales eUICCs?
+    data = encode_tlv(b'\xBF\x31', data)
+    result = parse_tags(es10x(sc, cla, data, max_command_data=max_command_data))
+    result_code = int.from_bytes(result[b'\xBF\x31'][0][b'\x80'][0], byteorder='big', signed=True)
+
+    if result_code == 0:
+        logger.info('Profile switch successful')
+        return True
+    else:
+        logger.error('Profile switch failed: %s', result_codes.get(result_code, 'Invalid result code'))
+        return False
+
+
+@dataclass
+class Profile:
+    iccid_raw: bytes
+    service_provider_name: str|None
+    profile_name: str|None
+    enabled: bool
+
+    @property
+    def iccid(self):
+        return parse_iccid(self.iccid_raw)
+
+
+profiles = []
+profile_states = ['disabled', 'enabled']
+profile_classes = ['test', 'provisioning', 'operational']
+notification_event_names = ['install', 'enable', 'disable', 'delete']
+
+
+def get_profiles(cla: int):
+    tag_list = bytearray()
+    tag_list += b'\x5A'      # ICCID
+    tag_list += b'\x4F'      # ISD-P AID
+    tag_list += b'\x9F\x70'  # Profile state
+    tag_list += b'\x90'      # Profile nickname
+    tag_list += b'\x91'      # Service provider name
+    tag_list += b'\x92'      # Profile name
+    tag_list += b'\x95'      # Profile class
+    tag_list += b'\xB6'      # Notification configuration info
+    tag_list += b'\xB7'      # Profile owner
+
+    request = encode_tlv(b'\xBF\x2D', encode_tlv(b'\x5C', tag_list))
+    result = es10x(sc, cla_isdr, request, max_command_data=max_command_data)
+    profile_data = parse_tags(result)
+
+    profiles.clear()
+    for i, profile in enumerate(profile_data[b'\xbf\x2d'][0][b'\xa0'][0][b'\xe3'], start=1):
+        service_provider_name = profile[b'\x91'][0].decode('utf-8', errors='replace') if b'\x91' in profile else None
+        profile_name = profile[b'\x92'][0].decode('utf-8', errors='replace') if b'\x92' in profile else None
+        profile_nickname = profile[b'\x90'][0].decode('utf-8', errors='replace') if b'\x90' in profile else None
+        iccid_raw = profile[b'\x5A'][0]
+        iccid = parse_iccid(iccid_raw)
+        isdp_aid = profile[b'\x4F'][0].hex().upper()
+        profile_state = profile_states[int.from_bytes(profile[b'\x9F\x70'][0], byteorder='big', signed=True)]
+        profile_class = profile_classes[int.from_bytes(profile[b'\x95'][0], byteorder='big', signed=True)]
+        sm_dp_plus_server = None
+        notification_events = None
+        profile_owner = None
+
+        if b'\xB6' in profile:
+            notification_event_raw = profile[b'\xB6'][0][b'\x30'][0][b'\x80'][0]
+            unused_bits = notification_event_raw[0]
+            notification_event_bitstring = '{:b}'.format(int.from_bytes(notification_event_raw[1:], byteorder='big') >> unused_bits).ljust(4, '0')
+            notification_events_list = []
+            for i in range(4):
+                if notification_event_bitstring[i] == '1':
+                    notification_events_list.append(notification_event_names[i])
+            notification_events = ', '.join(notification_events_list)
+            sm_dp_plus_server = profile[b'\xB6'][0][b'\x30'][0][b'\x81'][0].decode('utf-8')
+
+        if b'\xB7' in profile:
+            mcc_mnc = profile[b'\xB7'][0][b'\x80'][0].hex().upper()
+            mcc = mcc_mnc[1] + mcc_mnc[0] + mcc_mnc[3]
+            mnc = mcc_mnc[5] + mcc_mnc[4] + mcc_mnc[2]
+
+            profile_owner = mcc.rstrip('F') + ' '  + mnc.rstrip('F')
+
+        profiles.append(Profile(iccid_raw=iccid_raw, service_provider_name=service_provider_name, profile_name=profile_name,
+                                enabled=profile_state == 'enabled'))
+
+        logger.info('Profile %d:', i)
+        logger.info('\tService provider name: %s', service_provider_name)
+        logger.info('\tProfile name: %s', profile_name)
+        logger.info('\tProfile nickname: %s', profile_nickname)
+        logger.info('\tProfile owner: %s', profile_owner)
+        logger.info('\tICCID: %s', iccid)
+        logger.info('\tISD-P AID: %s', isdp_aid)
+        logger.info('\tProfile state: %s', profile_state)
+        logger.info('\tProfile class: %s', profile_class)
+        logger.info('\tNotification events: %s', notification_events)
+        logger.info('\tNotification SM-DP+ server: %s', sm_dp_plus_server)
+
+
 PGUP_PGDOWN_LINES = 10
 SCROLLBACK = 2000
 PROMPT_LINES = 6
@@ -1004,6 +1170,8 @@ def move_up_by(n: int):
     cursor = editscreen.getyx()
     pad_scroll = max(0, pad_scroll - n)
     if not (pad_scroll == last_line - (curses.LINES - PROMPT_LINES - 1) or last_line < curses.LINES - PROMPT_LINES - 1):
+        main_window.addstr(curses.LINES - PROMPT_LINES - 1, 1, ' scrolling ')
+        main_window.noutrefresh()
         currently_scrolling = True
     editscreen.move(*cursor)
     flush_screen()
@@ -1014,6 +1182,8 @@ def move_down_by(n: int):
     cursor = editscreen.getyx()
     pad_scroll = min(last_line - (curses.LINES - PROMPT_LINES - 1), pad_scroll + n)
     if pad_scroll == last_line - (curses.LINES - PROMPT_LINES - 1) or last_line < curses.LINES - PROMPT_LINES - 1:
+        main_window.hline(curses.LINES - PROMPT_LINES - 1, 0, curses.ACS_HLINE, curses.COLS)
+        main_window.noutrefresh()
         currently_scrolling = False
     editscreen.move(*cursor)
     flush_screen()
@@ -1073,20 +1243,33 @@ def print_screen(*args, end='\n', flush=True):
         flush_screen()
 
 async def cli():
-    global service
+    global network_type, profile_switch_requested
 
     cli_parser = argparse.ArgumentParser(prog='', description='Modem emulator', exit_on_error=False, add_help=False, color=False)
     subparsers = cli_parser.add_subparsers(dest='command')
     exit_parser = subparsers.add_parser('exit', add_help=False, exit_on_error=False, color=False, help='Exit the program')
     help_parser = subparsers.add_parser('help', add_help=False, exit_on_error=False, color=False, help='Get this message')
+    reset_parser = subparsers.add_parser('reset', add_help=False, exit_on_error=False, color=False, help='Reset the UICC')
+    profile_parser = subparsers.add_parser('profile', add_help=False, exit_on_error=False, color=False, help='Manage eUICC profiles')
+
+    profile_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
+    profile_subparsers = profile_parser.add_subparsers(dest='profile_command')
+    profile_subparsers.add_parser('list', add_help=False, exit_on_error=False, color=False, help='List installed profiles')
+    switch_parser = profile_subparsers.add_parser('switch', add_help=False, exit_on_error=False, color=False, help='Switch the activated profile')
+    switch_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
+    switch_parser.add_argument('iccid', metavar='ICCID', help='The ICCID of the profile to switch to')
+
     network_parser = subparsers.add_parser('network', add_help=False, exit_on_error=False, color=False, help='Manage the network')
     network_parser.add_argument('-h', '--help', action='store_true')
     poll_parser = subparsers.add_parser('poll', help='Force polling on a Thales eUICC', add_help=False, exit_on_error=False, color=False)
     poll_parser.add_argument('-h', '--help', action='store_true')
     network_subparsers = network_parser.add_subparsers(dest='network_command')
-    network_subparsers.add_parser('disconnect', add_help=False, exit_on_error=False, color=False, help='Disconnect from the network')
-    network_subparsers.add_parser('connect', add_help=False, exit_on_error=False, color=False, help='Connect to the network')
-    network_subparsers.add_parser('status', add_help=False, exit_on_error=False, color=False, help='Get the current network status')
+    disconnect_parser = network_subparsers.add_parser('disconnect', add_help=False, exit_on_error=False, color=False, help='Disconnect from the network')
+    disconnect_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
+    connect_parser = network_subparsers.add_parser('connect', add_help=False, exit_on_error=False, color=False, help='Connect to the network')
+    connect_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
+    status_parser = network_subparsers.add_parser('status', add_help=False, exit_on_error=False, color=False, help='Get the current network status')
+    status_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
     while True:
         await cli_line_available_event.wait()
         cli_line_available_event.clear()
@@ -1099,57 +1282,94 @@ async def cli():
             pass  # help was printed
         else:
             match args.command:
+                case 'profile':
+                    if args.help and args.profile_command is None:
+                        print_screen(profile_parser.format_help(), end='')
+                    else:
+                        match args.profile_command:
+                            case 'list':
+                                print_screen('Note: reset the eUICC to re-read the list of profiles as it might have changed since then')
+                                for i, profile in enumerate(profiles, start=1):
+                                    print_screen('Profile', i)
+                                    print_screen('\tICCID:', profile.iccid)
+                                    print_screen('\tService provider name:', profile.service_provider_name)
+                                    print_screen('\tProfile name:', profile.profile_name)
+                                    print_screen('\tProfile enabled:', profile.enabled)
+                            case 'switch':
+                                if args.help:
+                                    print_screen(switch_parser.format_help(), end='')
+                                else:
+                                    for profile in profiles:
+                                        if profile.iccid == args.iccid:
+                                            profile_switch_requested = profile.iccid_raw
+                                            card_reset_event.set()
+                                            break
+                                    else:
+                                        print_screen('Error: profile', args.iccid, 'not found')
+                case 'reset':
+                    print_screen('Resetting the card')
+                    card_reset_event.set()
                 case 'help':
                     print_screen(cli_parser.format_help(), end='')
                 case 'exit':
                     return
                 case 'network':
-                    if args.help:
+                    if args.help and args.network_command is None:
                         print_screen(network_parser.format_help(), end='')
                     else:
                         match args.network_command:
                             case 'status':
-                                if service:
-                                    print_screen('Connected to the network')
+                                if args.help:
+                                    print_screen(status_parser.format_help(), end='')
                                 else:
-                                    print_screen('Disconnected from the network')
-                                print_screen('IMEI:', imei)
-                                print_screen('Operator:', location.mcc, location.mnc)
+                                    if network_type is not NetworkType.disconnected:
+                                        print_screen('Connected to the network, network type', network_friendly_names[network_type])
+                                    else:
+                                        print_screen('Disconnected from the network')
+                                    print_screen('IMEI:', imei)
+                                    if network_type is NetworkType.eutran:
+                                        print_screen('Operator:', location.mcc, location.mnc)
                             case 'disconnect':
-                                if not service:
-                                    print_screen('Already disconnected')
+                                if args.help:
+                                    print_screen(disconnect_parser.format_help(), end='')
                                 else:
-                                    print_screen('Disconnecting from network')
-                                    await waiting_for_refresh.wait()
-                                    service = False
-                                    update_location_no_service()
-                                    if Event.LOCATION_STATUS in requested_event_list:
-                                        logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
-                                        data = bytearray()
-                                        data += EventList((Event.LOCATION_STATUS,), cr=True)
-                                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
-                                        data += LocationStatus(status=0x02, cr=True)  # No service
-                                        sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
+                                    if network_type is NetworkType.disconnected:
+                                        print_screen('Already disconnected')
                                     else:
-                                        logger.warning('SIM did not set up Location status in the event list')
+                                        print_screen('Disconnecting from network')
+                                        await waiting_for_refresh.wait()
+                                        network_type = NetworkType.disconnected
+                                        update_location_no_service()
+                                        if Event.LOCATION_STATUS in requested_event_list:
+                                            logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
+                                            data = bytearray()
+                                            data += EventList((Event.LOCATION_STATUS,), cr=True)
+                                            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
+                                            data += LocationStatus(status=0x02, cr=True)  # No service
+                                            sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
+                                        else:
+                                            logger.warning('SIM did not set up Location status in the event list')
                             case 'connect':
-                                if service:
-                                    print_screen('Already connected')
+                                if args.help:
+                                    print_screen(connect_parser.format_help(), end='')
                                 else:
-                                    print_screen('Connecting to network')
-                                    await waiting_for_refresh.wait()
-                                    service = True
-                                    update_location_info(location)
-                                    if Event.LOCATION_STATUS in requested_event_list:
-                                        logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
-                                        data = bytearray()
-                                        data += EventList((Event.LOCATION_STATUS,), cr=True)
-                                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
-                                        data += LocationStatus(status=0x00, cr=True)  # Service available
-                                        data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci, cr=True)  # E-UTRAN
-                                        sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
+                                    if network_type is not NetworkType.disconnected:
+                                        print_screen('Already connected')
                                     else:
-                                        logger.warning('SIM did not set up Location status in the event list')
+                                        print_screen('Connecting to network')
+                                        await waiting_for_refresh.wait()
+                                        network_type = NetworkType.eutran
+                                        update_location_info(location)
+                                        if Event.LOCATION_STATUS in requested_event_list:
+                                            logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
+                                            data = bytearray()
+                                            data += EventList((Event.LOCATION_STATUS,), cr=True)
+                                            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
+                                            data += LocationStatus(status=0x00, cr=True)  # Service available
+                                            data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci, cr=True)  # E-UTRAN
+                                            sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
+                                        else:
+                                            logger.warning('SIM did not set up Location status in the event list')
                 case 'poll':
                     if args.help:
                         print_screen(poll_parser.format_help(), end='')
@@ -1165,65 +1385,103 @@ async def cli():
         cli_line_processed_event.set()
 
 cla_ipae: int|None = None
+cla_isdr: int|None = None
+is_sgp32 = False
+profile_switch_requested: bytes|None = None
 
 async def main():
-    global negotiated_poll_interval, is_thales, cla_ipae
+    global negotiated_poll_interval, is_thales, cla_ipae, cla_isdr, has_5g, is_sgp32, profile_switch_requested
 
     asyncio.get_running_loop().set_exception_handler(exc_handler)
 
-    try:
-        send_terminal_capability()
-        cla_isdr = open_logical_channel()
-        cla_ipae = open_logical_channel()
-        is_sgp32 = select_isd_r(cla_isdr)
-        get_euicc_info(cla_isdr, is_sgp32=is_sgp32)
-        enable_ipae(cla_isdr)
+    cli_process_task = None
+    cli_input_task = None
+
+    while True:
+        card_reset_event.clear()
+        sc.reset()
+
         try:
-            select_ipae(cla_ipae)  # Thales only
-            logger.info('Thales SIM detected')
-            is_thales = True
-            get_ipae_version(cla_ipae)
+            send_terminal_capability()
+            cla_isdr = open_logical_channel()
+            cla_ipae = open_logical_channel()
+            is_sgp32 = select_isd_r(cla_isdr)
+            if profile_switch_requested:
+                logger.info('Profile switch requested, switching to %s', parse_iccid(profile_switch_requested))
+                result = switch_profile(cla_isdr, profile_switch_requested)
+                profile_switch_requested = False
+                if result:
+                    logger.info('Resetting the card after successful profile switch')
+                    continue  # reset the card
+            get_euicc_info(cla_isdr)
+            get_profiles(cla_isdr)
+            enable_ipae(cla_isdr)
+            try:
+                select_ipae(cla_ipae)  # Thales only
+                logger.info('Thales SIM detected')
+                is_thales = True
+                get_ipae_version(cla_ipae)
+            except APDUException:
+                logger.warning('Not a Thales SIM')
+
         except APDUException:
-            logger.warning('Not a Thales SIM')
+            logger.error('SIM does not appear to be a SGP.22/SGP.32 eUICC')
 
-    except APDUException:
-        logger.error('SIM does not appear to be a SGP.32 eUICC')
+        select_usim()
 
-    select_usim()
-    update_location_info(location)
-    send_terminal_profile()
+        try:
+            # Check if 5G is available on the SIM
+            sc.transmit(cla=0x00, ins=0xA4, p1=0x00, p2=0x0C, data=b'\x5F\xC0')
+            sc.transmit(cla=0x00, ins=0xA4, p1=0x00, p2=0x0C, data=b'\x7F\xFF')
+        except BaseException:
+            logger.warning('5G not available on the SIM')
+        else:
+            has_5g = True
 
-    # initial setup:
-    while sc.refresh_needed is not None:
-        process_proactive_command(fetch())
+        update_location_info(location)
+        send_terminal_profile()
 
-    logger.info('Initial setup done')
-    if negotiated_poll_interval is None:
-        logger.warning('Card did not set up a poll interval! Using 30s as default')
-        negotiated_poll_interval = 30
+        # initial setup:
+        while sc.refresh_needed is not None:
+            process_proactive_command(fetch())
+
+        logger.info('Initial setup done')
+        if negotiated_poll_interval is None:
+            logger.warning('Card did not set up a poll interval! Using 30s as default')
+            negotiated_poll_interval = 30
 
 
-    # async with asyncio.TaskGroup() as tg:
-    polling_task = asyncio.create_task(poll())
-    refresh_task = asyncio.create_task(do_refresh())
-    cli_process_task = asyncio.create_task(cli())
-    cli_input_task = asyncio.create_task(asyncio.to_thread(cli_input_thread, asyncio.get_running_loop()))
+        polling_task = asyncio.create_task(poll())
+        refresh_task = asyncio.create_task(do_refresh())
+        if cli_process_task is None:
+            cli_process_task = asyncio.create_task(cli())
+        if cli_input_task is None:
+            cli_input_task = asyncio.create_task(asyncio.to_thread(cli_input_thread, asyncio.get_running_loop()))
+        card_reset_task = asyncio.create_task(card_reset_event.wait())
 
-    done, pending = await asyncio.wait((polling_task, refresh_task, cli_input_task, cli_process_task), return_when=asyncio.FIRST_COMPLETED)
-    for task in pending:
-        task.cancel()
-
+        done, pending = await asyncio.wait((polling_task, refresh_task, cli_input_task, cli_process_task, card_reset_task), return_when=asyncio.FIRST_COMPLETED)
+        if len(done) == 1 and card_reset_task in done:
+            # card reset was requested
+            polling_task.cancel()
+            refresh_task.cancel()
+            close_all_tasks()
+            continue
+        else:
+            for task in pending:
+                task.cancel()
+            break
 
 
 def exc_handler(loop, context):
-    if context.get('exception') is not None:
-        kw = {'exc_info': context['exception']}
+    if (exc := context.get('exception')) is not None:
+        kw = {'exc_info': exc}
     else:
         kw = {}
     logger.error('Exception: %s', context['message'], **kw)
     loop.default_exception_handler(context)
 
 
+main_window: curses.window|None = None
 screen: curses.window|None = None
 editscreen: curses.window|None = None
 textinput: curses.textpad.Textbox|None = None
@@ -1233,6 +1491,10 @@ def run_main(stdscr: curses.window):
     global screen
     global textinput
     global editscreen
+    global main_window
+
+    main_window = stdscr
+    stdscr.idlok(True)
 
     screen = curses.newpad(SCROLLBACK, curses.COLS)
     screen.clear()
