@@ -12,7 +12,7 @@ import socket
 
 from enum import IntEnum, Enum, auto
 
-from tlv_utils import parse_tag, parse_tags, parse_length, parse_comprehension_tlv_tag, encode_tlv, CTLV, format_tags
+from tlv_utils import parse_tag, parse_tags, parse_length, parse_comprehension_tlv_tag, encode_tlv, CTLV
 from smartcard_utils import APDUException, Smartcard, es10x
 
 import asyncio
@@ -22,9 +22,73 @@ import argparse
 import curses
 import curses.textpad
 import os
+import smartcard.CardConnection
+import smartcard.ATR
+import smartcard.Exceptions
+import traceback
+
+
+parser = argparse.ArgumentParser(description='BIP modem emulator', epilog='Note: the PIN code will be used for all '
+                                                                          'profiles that have the PIN enabled. Disable '
+                                                                          'the PIN first on the SIM if that is '
+                                                                          'inconvenient.')
+parser.add_argument('--mcc', default='204', help='Mobile country code (default %(default)s)')
+parser.add_argument('--mnc', default='04', help='Mobile network code (default %(default)s)')
+parser.add_argument('--imei', default='356358231187560', help='IMEI (default %(default)s)')
+parser.add_argument('-p', '--pin', default=None, help='PIN code')
+parser.add_argument('--network', choices=('none', '2G', '3G', '4G', '5G'), default='4G', help='Network type (default %(default)s; choices %(choices)s)')
+parser.add_argument('-r', '--reader', metavar='N', default='auto', help='Reader index or name (default %(default)s, give the value \'list\' to list readers)')
+args = parser.parse_args()
+
+if args.pin is not None and len(args.pin) > 8:
+    sys.exit('PIN is too long, maximum 8 characters')
+if args.pin is not None and not all(c in '1234567890' for c in args.pin):
+    sys.exit('PIN must be numerical')
+
+reader_index = None
+if args.reader == 'list':
+    readers = smartcard.System.readers()
+    for i, reader in enumerate(readers):
+        print(f'[{i}]: {reader}')
+    sys.exit(0)
+elif args.reader == 'auto':
+    readers = smartcard.System.readers()
+
+    reader_with_t0_card = None
+    reader_with_card = None
+    reader_with_euicc_card = None
+    for i, reader in enumerate(readers):
+        conn: smartcard.CardConnection.CardConnection = reader.createConnection()
+        try:
+            conn.connect()
+            if reader_with_card is None:
+                reader_with_card = i
+            atr = smartcard.ATR.ATR(conn.getATR())
+            if atr.getSupportedProtocols().get('T=0', False) and reader_with_t0_card is None:
+                reader_with_t0_card = i
+            for j, td in enumerate(atr.TD):
+                if td is not None and td & 0x0F == 15:
+                    if j < len(atr.TB) - 1 and atr.TB[j + 1] is not None and atr.TB[j + 1] & 0x82 == 0x82:
+                        if reader_with_euicc_card is None:
+                            reader_with_euicc_card = i
+            conn.disconnect()
+
+        except (smartcard.Exceptions.NoCardException, smartcard.Exceptions.CardConnectionException):
+            pass
+
+    if (reader_index := next(filter(lambda i: i is not None, (reader_with_euicc_card,
+                                                              reader_with_t0_card,
+                                                              reader_with_card)), None)) is None:
+        sys.exit('No reader with inserted card found')
+
+else:
+    reader_index = int(args.reader)
+
+if args.network != '4G':
+    raise NotImplementedError(f'Network {args.network} not implemented yet')
 
 refresh_event = asyncio.Event()
-sc = Smartcard(refresh_event=refresh_event, reader=2)
+sc = Smartcard(refresh_event=refresh_event, reader=reader_index)
 sc.connect()
 
 USIM_AID = bytes.fromhex('A0000000871002')
@@ -250,25 +314,15 @@ class EUTRANLocation:
         assert self.cell_id < 256
         return ((((self.enb_id << 8) | self.cell_id) << 4) | 0x0F).to_bytes(byteorder='big', length=4)
 
-parser = argparse.ArgumentParser(description='BIP modem emulator')
-parser.add_argument('--mcc', default='204', help='Mobile country code (default %(default)s)')
-parser.add_argument('--mnc', default='04', help='Mobile network code (default %(default)s)')
-parser.add_argument('--imei', default='356358231187560', help='IMEI (default %(default)s)')
-parser.add_argument('--network', choices=('none', '2G', '3G', '4G', '5G'), default='4G', help='Network type (default %(default)s; choices %(choices)s)')
-args = parser.parse_args()
-
-if args.network != '4G':
-    raise NotImplementedError(f'Network {args.network} not implemented yet')
-
 location = EUTRANLocation(args.mcc, args.mnc)
 imei = args.imei
 
 
-def select_usim():
-    sc.transmit(cla=0x00, ins=0xA4, p1=0x04, p2=0x00, data=USIM_AID, le=0)
+def select_usim(usim_aid: bytes) -> bytes:
+    return sc.transmit(cla=0x00, ins=0xA4, p1=0x04, p2=0x04, data=usim_aid, le=0)
 
 
-def update_location_info(loc: EUTRANLocation):
+def update_location_eutran(loc: EUTRANLocation):
     # Zero out EF.LOCI
     sc.transmit(cla=0x00, ins=0xA4, p1=0x00, p2=0x04, data=EF_LOCI, le=0x00)
     sc.transmit(cla=0x00, ins=0xD6, p1=0x00, p2=0x00, data=bytes.fromhex('FFFFFFFFFFFFFFFFFFFF01'))
@@ -673,9 +727,14 @@ def process_proactive_command(ret: bytes):
         data = ret[i:i+length]
         i += length
         logger.debug(f'C-TLV tag {tag.hex()} (CR={cr}): {data.hex()}')
+        parsed_tag = CTLV.parse(tag, cr, data)
         if tag in tags:
-            raise ValueError('Duplicate tag')
-        tags[tag] = CTLV.parse(tag, cr, data)
+            if isinstance(tags[tag], list):
+                tags[tag].append(parsed_tag)
+            else:
+                tags[tag] = [tags[tag], parsed_tag]
+        else:
+            tags[tag] = parsed_tag
     try:
         match tags[CommandDetails].command:
             case Command.POLL_INTERVAL:
@@ -944,8 +1003,16 @@ def process_proactive_command(ret: bytes):
                     sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                 else:
                     raise CommandDataNotUnderstood()
+            case Command.SET_UP_MENU:
+                logger.info('Processing SET UP MENU')
+                data = bytearray()
+                data += tags[CommandDetails]
+                data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
+                sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
+
             case cmd:
-                logger.warning(f'unknown proactive command {cmd:02X}')
+                logger.warning(f'Unhandled proactive command {Command(cmd).name}')
                 raise CommandTypeNotUnderstood()
     except CommandDataNotUnderstood:
         data = bytearray()
@@ -1088,17 +1155,35 @@ def enable_ipae(cla):
         logger.info('IPAe activation successful')
 
 
-def select_isd_r(cla) -> bool:
+def select_isd_r(cla) -> tuple[bool, bool]:
     global max_command_data
     ISD_R_AID = bytes.fromhex('A0000005591010FFFFFFFF8900000100')
-    fci = parse_tags(sc.transmit(cla=cla, ins=0xA4, p1=0x04, p2=0x0C, data=ISD_R_AID))
-    max_command_data = int.from_bytes(fci[b'\x6f'][0][b'\xa5'][0][b'\x9f\x65'][0], byteorder='big')
+    fci = parse_tags(sc.transmit(cla=cla, ins=0xA4, p1=0x04, p2=0x00, data=ISD_R_AID, le=0))
+
+    sgp22 = b'\xE0' in fci[b'\x6F'][0]
     sgp32 = b'\xE1' in fci[b'\x6F'][0]
+
+    if not sgp22:
+        logger.warning('No SGP.22 support')
+    else:
+        logger.info('SGP.22 eUICC')
+        sgp22_version = '.'.join(map(str, fci[b'\x6F'][0][b'\xE0'][0][b'\x82'][0]))
+        logger.info('SGP.22 version: %s', sgp22_version)
+        bitstring = fci[b'\x6F'][0][b'\xE0'][0][b'\x80'][0] if b'\x80' in fci[b'\x6F'][0][b'\xE0'][0] else b'\x00\x00'
+        unused_bits = bitstring[0]
+        value = int.from_bytes(bitstring[1:], byteorder='big') >> unused_bits
+        value = f'{value:b}'.ljust(2, '0')
+        lpae_cat_supported = value[0] == '1'
+        lpae_scws_supported = value[1] == '1'
+        logger.info('LPAe using CAT supported: %s', lpae_cat_supported)
+        logger.info('LPAe using SCWS supported: %s', lpae_scws_supported)
 
     if not sgp32:
         logger.warning('No SGP.32 support')
+        max_command_data = 255
     else:
         logger.info('SGP.32 eUICC')
+        max_command_data = int.from_bytes(fci[b'\x6f'][0][b'\xa5'][0][b'\x9f\x65'][0], byteorder='big')
 
         bitstring = fci[b'\x6F'][0][b'\xE1'][0][b'\x80'][0]
         unused_bits = bitstring[0]
@@ -1109,7 +1194,7 @@ def select_isd_r(cla) -> bool:
         logger.info('IPAe supported: %s', ipae_supported)
         logger.info('Profile enabled: %s', profile_enabled)
 
-    return sgp32
+    return sgp22, sgp32
 
 
 def get_ipae_version(cla):
@@ -1123,7 +1208,10 @@ def select_ipae(cla):
 
 
 def send_terminal_capability():
-    sc.transmit(cla=0x80, ins=0xAA, p1=0x00, p2=0x00, data=bytes.fromhex('A903840101'))
+    data = bytearray()
+    data += encode_tlv(b'\x83', b'\x0F')  # SGP.22 LPAd supported, LUIe based on SCWS supported
+    data += encode_tlv(b'\x84', b'\x01')  # SGP.32 IPAd supported
+    sc.transmit(cla=0x80, ins=0xAA, p1=0x00, p2=0x00, data=encode_tlv(b'\xA9', data))
 
 
 def parse_iccid(iccid: bytes) -> str:
@@ -1135,12 +1223,11 @@ result_codes = {0: 'ok', 1: 'ICCID not found', 2: 'Profile not in disabled state
 
 def switch_profile(cla: int, iccid: bytes):
     data = bytearray()
-    data += encode_tlv(b'\x5A', iccid)
-    data += encode_tlv(b'\x80', b'\xFF')  # refreshFlag
-    if is_sgp32:
-        data = encode_tlv(b'\xA0', data)  # Only works with Thales eUICCs?
+    data += encode_tlv(b'\xA0', encode_tlv(b'\x5A', iccid))
+    data += encode_tlv(b'\x81', b'\xFF')  # refreshFlag
     data = encode_tlv(b'\xBF\x31', data)
     result = parse_tags(es10x(sc, cla, data, max_command_data=max_command_data))
+
     result_code = int.from_bytes(result[b'\xBF\x31'][0][b'\x80'][0], byteorder='big', signed=True)
 
     if result_code == 0:
@@ -1149,6 +1236,53 @@ def switch_profile(cla: int, iccid: bytes):
     else:
         logger.error('Profile switch failed: %s', result_codes.get(result_code, 'Invalid result code'))
         return False
+
+
+def get_efdir():
+    """
+    MF must be selected
+    """
+    fcp = parse_tags(sc.transmit(cla=0x00, ins=0xA4, p1=0x00, p2=0x04, data=b'\x2F\x00', le=0))
+    efdir_file_size = int.from_bytes(fcp[b'\x62'][0][b'\x80'][0], byteorder='big')
+    efdir_record_size = int.from_bytes(fcp[b'\x62'][0][b'\x82'][0][2:4], byteorder='big')
+    efdir_num_records = fcp[b'\x62'][0][b'\x82'][0][4]
+    logger.debug('EF.DIR file size: %d', efdir_file_size)
+    logger.debug('EF.DIR record size: %d', efdir_record_size)
+    logger.debug('EF.DIR number of records: %d', efdir_num_records)
+
+    efdir = []
+    # Read the records
+    for i in range(efdir_num_records):
+        record = parse_tags(sc.transmit(cla=0x00, ins=0xB2, p1=(i + 1), p2=0x04, le=efdir_record_size),
+                            break_on_ff=True)
+        if record:
+            efdir.append(record)
+
+    return efdir
+
+
+def get_usim_aid() -> bytes|None:
+    efdir = get_efdir()
+
+    logger.debug('Found %s records in EF.DIR', len(efdir))
+    for record in efdir:
+        aid = record[b'\x61'][0][b'\x4f'][0]
+        if aid.startswith(bytes.fromhex('A00000008710')):
+            logger.debug('USIM AID: %s', aid.hex().upper())
+            return aid
+    return None
+
+
+def get_pin_attempts(pin_ref):
+    try:
+        sc.transmit(cla=0x00, ins=0x20, p1=0x00, p2=pin_ref)
+    except APDUException as e:
+        if e.sw1 == 0x63 and e.sw2 & 0xF0 == 0xC0:
+            return e.sw2 & 0x0F
+        else:
+            raise e from None
+    else:
+        raise RuntimeError('VERIFY PIN with empty data did not return an error code')
 
 
 @dataclass
@@ -1186,51 +1320,55 @@ def get_profiles(cla: int):
     profile_data = parse_tags(result)
 
     profiles.clear()
-    for i, profile in enumerate(profile_data[b'\xbf\x2d'][0][b'\xa0'][0][b'\xe3'], start=1):
-        service_provider_name = profile[b'\x91'][0].decode('utf-8', errors='replace') if b'\x91' in profile else None
-        profile_name = profile[b'\x92'][0].decode('utf-8', errors='replace') if b'\x92' in profile else None
-        profile_nickname = profile[b'\x90'][0].decode('utf-8', errors='replace') if b'\x90' in profile else None
-        iccid_raw = profile[b'\x5A'][0]
-        iccid = parse_iccid(iccid_raw)
-        isdp_aid = profile[b'\x4F'][0].hex().upper()
-        profile_state = profile_states[int.from_bytes(profile[b'\x9F\x70'][0], byteorder='big', signed=True)]
-        profile_class = profile_classes[int.from_bytes(profile[b'\x95'][0], byteorder='big', signed=True)]
-        sm_dp_plus_server = None
-        notification_events = None
-        profile_owner = None
 
-        if b'\xB6' in profile:
-            notification_event_raw = profile[b'\xB6'][0][b'\x30'][0][b'\x80'][0]
-            unused_bits = notification_event_raw[0]
-            notification_event_bitstring = '{:b}'.format(int.from_bytes(notification_event_raw[1:], byteorder='big') >> unused_bits).ljust(4, '0')
-            notification_events_list = []
-            for j in range(4):
-                if notification_event_bitstring[i] == '1':
-                    notification_events_list.append(notification_event_names[j])
-            notification_events = ', '.join(notification_events_list)
-            sm_dp_plus_server = profile[b'\xB6'][0][b'\x30'][0][b'\x81'][0].decode('utf-8')
+    if not profile_data[b'\xbf\x2d'][0][b'\xa0'][0]:
+        logger.warning('No profiles installed')
+    else:
+        for i, profile in enumerate(profile_data[b'\xbf\x2d'][0][b'\xa0'][0][b'\xe3'], start=1):
+            service_provider_name = profile[b'\x91'][0].decode('utf-8', errors='replace') if b'\x91' in profile else None
+            profile_name = profile[b'\x92'][0].decode('utf-8', errors='replace') if b'\x92' in profile else None
+            profile_nickname = (profile[b'\x90'][0].partition(b'\x00')[0]).decode('utf-8', errors='replace') if b'\x90' in profile else None
+            iccid_raw = profile[b'\x5A'][0]
+            iccid = parse_iccid(iccid_raw)
+            isdp_aid = profile[b'\x4F'][0].hex().upper()
+            profile_state = profile_states[int.from_bytes(profile[b'\x9F\x70'][0], byteorder='big', signed=True)]
+            profile_class = profile_classes[int.from_bytes(profile[b'\x95'][0], byteorder='big', signed=True)]
+            sm_dp_plus_server = None
+            notification_events = None
+            profile_owner = None
 
-        if b'\xB7' in profile:
-            mcc_mnc = profile[b'\xB7'][0][b'\x80'][0].hex().upper()
-            mcc = mcc_mnc[1] + mcc_mnc[0] + mcc_mnc[3]
-            mnc = mcc_mnc[5] + mcc_mnc[4] + mcc_mnc[2]
+            if b'\xB6' in profile:
+                notification_event_raw = profile[b'\xB6'][0][b'\x30'][0][b'\x80'][0]
+                unused_bits = notification_event_raw[0]
+                notification_event_bitstring = '{:b}'.format(int.from_bytes(notification_event_raw[1:], byteorder='big') >> unused_bits).ljust(4, '0')
+                notification_events_list = []
+                for j in range(4):
+                    if notification_event_bitstring[i] == '1':
+                        notification_events_list.append(notification_event_names[j])
+                notification_events = ', '.join(notification_events_list)
+                sm_dp_plus_server = profile[b'\xB6'][0][b'\x30'][0][b'\x81'][0].decode('utf-8')
 
-            profile_owner = mcc.rstrip('F') + ' '  + mnc.rstrip('F')
+            if b'\xB7' in profile:
+                mcc_mnc = profile[b'\xB7'][0][b'\x80'][0].hex().upper()
+                mcc = mcc_mnc[1] + mcc_mnc[0] + mcc_mnc[3]
+                mnc = mcc_mnc[5] + mcc_mnc[4] + mcc_mnc[2]
 
-        profiles.append(Profile(iccid_raw=iccid_raw, service_provider_name=service_provider_name, profile_name=profile_name,
-                                enabled=profile_state == 'enabled'))
+                profile_owner = mcc.rstrip('F') + ' '  + mnc.rstrip('F')
 
-        logger.info('Profile %d:', i)
-        logger.info('\tService provider name: %s', service_provider_name)
-        logger.info('\tProfile name: %s', profile_name)
-        logger.info('\tProfile nickname: %s', profile_nickname)
-        logger.info('\tProfile owner: %s', profile_owner)
-        logger.info('\tICCID: %s', iccid)
-        logger.info('\tISD-P AID: %s', isdp_aid)
-        logger.info('\tProfile state: %s', profile_state)
-        logger.info('\tProfile class: %s', profile_class)
-        logger.info('\tNotification events: %s', notification_events)
-        logger.info('\tNotification SM-DP+ server: %s', sm_dp_plus_server)
+            profiles.append(Profile(iccid_raw=iccid_raw, service_provider_name=service_provider_name, profile_name=profile_name,
+                                    enabled=profile_state == 'enabled'))
+
+            logger.info('Profile %d:', i)
+            logger.info('\tService provider name: %s', service_provider_name)
+            logger.info('\tProfile name: %s', profile_name)
+            logger.info('\tProfile nickname: %s', profile_nickname)
+            logger.info('\tProfile owner: %s', profile_owner)
+            logger.info('\tICCID: %s', iccid)
+            logger.info('\tISD-P AID: %s', isdp_aid)
+            logger.info('\tProfile state: %s', profile_state)
+            logger.info('\tProfile class: %s', profile_class)
+            logger.info('\tNotification events: %s', notification_events)
+            logger.info('\tNotification SM-DP+ server: %s', sm_dp_plus_server)
 
 
 PGUP_PGDOWN_LINES = 10
@@ -1439,7 +1577,7 @@ async def cli():
                                         print_screen('Connecting to network')
                                         await waiting_for_refresh.wait()
                                         network_type = NetworkType.eutran
-                                        update_location_info(location)
+                                        update_location_eutran(location)
                                         if Event.LOCATION_STATUS in requested_event_list:
                                             logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
                                             data = bytearray()
@@ -1466,11 +1604,12 @@ async def cli():
 
 cla_ipae: int|None = None
 cla_isdr: int|None = None
+is_sgp22 = False
 is_sgp32 = False
 profile_switch_requested: bytes|None = None
 
 async def main():
-    global negotiated_poll_interval, is_thales, cla_ipae, cla_isdr, has_5g, is_sgp32, profile_switch_requested
+    global negotiated_poll_interval, is_thales, cla_ipae, cla_isdr, has_5g, is_sgp22, is_sgp32, profile_switch_requested
 
     asyncio.get_running_loop().set_exception_handler(exc_handler)
 
@@ -1485,7 +1624,7 @@ async def main():
             send_terminal_capability()
             cla_isdr = open_logical_channel()
             cla_ipae = open_logical_channel()
-            is_sgp32 = select_isd_r(cla_isdr)
+            is_sgp22, is_sgp32 = select_isd_r(cla_isdr)
             if profile_switch_requested:
                 logger.info('Profile switch requested, switching to %s', parse_iccid(profile_switch_requested))
                 result = switch_profile(cla_isdr, profile_switch_requested)
@@ -1494,37 +1633,95 @@ async def main():
                     logger.info('Resetting the card after successful profile switch')
                     continue  # reset the card
             get_euicc_info(cla_isdr)
-            get_profiles(cla_isdr)
-            enable_ipae(cla_isdr)
             try:
-                select_ipae(cla_ipae)  # Thales only
-                logger.info('Thales SIM detected')
-                is_thales = True
-                get_ipae_version(cla_ipae)
-            except APDUException:
-                logger.warning('Not a Thales SIM')
+                get_profiles(cla_isdr)
+            except BaseException as e:
+                logger.error('Exception when listing profiles', exc_info=e)
+            if is_sgp32:
+                enable_ipae(cla_isdr)
+                try:
+                    select_ipae(cla_ipae)  # Thales only
+                    logger.info('Thales SIM detected')
+                    is_thales = True
+                    get_ipae_version(cla_ipae)
+                except APDUException:
+                    logger.warning('Not a Thales SIM')
 
         except APDUException:
             logger.error('SIM does not appear to be a SGP.22/SGP.32 eUICC')
 
-        select_usim()
 
+        usim_aid = get_usim_aid()
+        if not usim_aid:
+            logger.error('Cannot find USIM AID')
+            await asyncio.sleep(5)
+            break
+
+        fcp = parse_tags(select_usim(usim_aid))
+
+        pin_status_template = parse_tags(fcp[b'\x62'][0][b'\xc6'][0])
+        ps_num_bytes = len(pin_status_template[b'\x90'][0])
+        pin_statuses = int.from_bytes(pin_status_template[b'\x90'][0], byteorder='big')
+        needs_verification = False
+        for i, pin in enumerate(pin_status_template.get(b'\x83', []), start=1):
+            enabled = (pin_statuses & (1 << (ps_num_bytes * 8 - i))) != 0
+            logger.info('PIN%d (%s) enabled: %s', i, pin.hex(), enabled)
+            if pin[0] == 0x01 and enabled:
+                needs_verification = True
+
+        if needs_verification:
+            remaining_tries = get_pin_attempts(0x01)
+
+            logger.info('PIN tries remaining: %d', remaining_tries)
+            if remaining_tries == 0:
+                logger.error('PIN is blocked, aborting')
+                await asyncio.sleep(5)
+                break
+            elif remaining_tries == 1:
+                logger.warning('Only 1 PIN try remaining, refusing to proceed')
+                await asyncio.sleep(5)
+                break
+
+            if args.pin is None:
+                logger.error('PIN is required')
+                await asyncio.sleep(5)
+                break
+
+            try:
+                # verify the PIN
+                sc.transmit(cla=0x00, ins=0x20, p1=0x00, p2=0x01, data=args.pin.encode('ascii').ljust(8, b'\xFF'))
+            except APDUException as e:
+                if e.sw1 == 0x63 and e.sw2 & 0xF0 == 0xC0:
+                    remaining_tries = e.sw2 & 0x0F
+                    logger.error('PIN verification failed! %d remaining attempts', remaining_tries)
+                    await asyncio.sleep(5)
+                    break
+                else:
+                    raise e from None
         try:
             # Check if 5G is available on the SIM
             sc.transmit(cla=0x00, ins=0xA4, p1=0x00, p2=0x0C, data=b'\x5F\xC0')
             sc.transmit(cla=0x00, ins=0xA4, p1=0x00, p2=0x0C, data=b'\x7F\xFF')
-        except BaseException:
+        except APDUException:
             logger.warning('5G not available on the SIM')
         else:
+            logger.info('5G is available')
             has_5g = True
 
-        update_location_info(location)
+        try:
+            update_location_eutran(location)
+        except BaseException as e:
+            logger.error('Error updating location information, 4G not available?', exc_info=e)
+
         send_terminal_profile()
-
         # initial setup:
-        while sc.refresh_needed is not None:
-            process_proactive_command(fetch())
-
+        try:
+            while sc.refresh_needed is not None:
+                process_proactive_command(fetch())
+        except Exception as e:
+            logger.error('Error', exc_info=e)
+            await asyncio.sleep(5)
+            break
         logger.info('Initial setup done')
         if negotiated_poll_interval is None:
             logger.warning('Card did not set up a poll interval! Using 30s as default')
@@ -1557,6 +1754,9 @@ def exc_handler(loop, context):
         kw = {'exc_info': exc}
     else:
         kw = {}
+    from pathlib import Path
+    if exc is not None:
+        Path('error.log').write_text('\n'.join(traceback.format_exception(exc)))
     logger.error('Exception: %s', context['message'], **kw)
     loop.default_exception_handler(context)
 

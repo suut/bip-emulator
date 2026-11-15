@@ -59,11 +59,14 @@ def parse_length(x: bytes, i: int) -> tuple[int, int | None]:
         return i + 1, l
 
 
-def parse_tags(data):
+def parse_tags(data, break_on_ff=False):
     max_length = len(data)
     i = 0
     out = {}
     while i < max_length:
+        if data[i] == 0xFF and break_on_ff:
+            return out
+
         i, tag, tag_class, constructed, tag_number = parse_tag(data, i)
         i, length = parse_length(data, i)
         contents = data[i:i+length]
