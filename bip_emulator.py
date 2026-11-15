@@ -36,18 +36,86 @@ ID_TERMINAL = 0x82
 ID_UICC = 0x81
 ID_CHANNEL = 0x20
 
-RES_SUCCESS = 0x00
-RES_COMMAND_TYPE_NOT_UNDERSTOOD = 0x31
-RES_COMMAND_DATA_NOT_UNDERSTOOD = 0x32
-RES_ACTION_IN_CONTRADICTION_WITH_CURRENT_TIMER_STATE = 0x24
-RES_COMMAND_CANNOT_BE_PROCESSED_CURRENTLY = 0x20
+class ResultCode(IntEnum):
+    # 0X and 1X: command has been performed
+    COMMAND_PERFORMED_SUCCESSFULLY = 0x00
+    COMMAND_PERFORMED_WITH_PARTIAL_COMPREHENSION = 0x01
+    COMMAND_PERFORMED_WITH_MISSING_INFORMATION = 0x02
+    REFRESH_PERFORMED_WITH_ADDITIONAL_EFS_READ = 0x03
+    COMMAND_PERFORMED_SUCCESSFULLY_REQUESTED_ICON_COULD_NOT_BE_DISPLAYED = 0x04
+    COMMAND_PERFORMED_BUT_MODIFIED_BY_CALL_CONTROL_BY_NAA = 0x05
+    COMMAND_PERFORMED_SUCCESSFULLY_LIMITED_SERVICE = 0x06
+    COMMAND_PERFORMED_WITH_MODIFICATION = 0x07
+    REFRESH_PERFORMED_BUT_INDICATED_NAA_WAS_NOT_ACTIVE = 0x08
+    COMMAND_PERFORMED_SUCCESSFULLY_TONE_NOT_PLAYED = 0x09
+    PROACTIVE_UICC_SESSION_TERMINATED_BY_THE_USER = 0x10
+    BACKWARD_MOVE_IN_THE_PROACTIVE_UICC_SESSION_REQUESTED_BY_THE_USER = 0x11
+    NO_RESPONSE_FROM_USER = 0x12
+    HELP_INFORMATION_REQUIRED_BY_THE_USER = 0x13
+    USSD_OR_SS_TRANSACTION_TERMINATED_BY_THE_USER = 0x14
 
-RES_EXTRA_NO_SERVICE = 0x04
+    # 2X: indicates to the UICC that it may be worth re-trying the command at a later opportunity
+    TERMINAL_CURRENTLY_UNABLE_TO_PROCESS_COMMAND = 0x20
+    NETWORK_CURRENTLY_UNABLE_TO_PROCESS_COMMAND = 0x21
+    USER_DID_NOT_ACCEPT_THE_PROACTIVE_COMMAND = 0x22
+    USER_CLEARED_DOWN_CALL_BEFORE_CONNECTION_OR_NETWORK_RELEASE = 0x23
+    ACTION_IN_CONTRADICTION_WITH_THE_CURRENT_TIMER_STATE = 0x24
+    INTERACTION_WITH_CALL_CONTROL_BY_NAA_TEMPORARY_PROBLEM = 0x25
+    LAUNCH_BROWSER_GENERIC_ERROR = 0x26
+    MMS_TEMPORARY_PROBLEM = 0x27
+
+    # 3X: indicates that it is not worth the UICC re-trying with an identical command
+    COMMAND_BEYOND_TERMINAL_CAPABILITIES = 0x30
+    COMMAND_TYPE_NOT_UNDERSTOOD_BY_TERMINAL = 0x31
+    COMMAND_DATA_NOT_UNDERSTOOD_BY_TERMINAL = 0x32
+    COMMAND_NUMBER_NOT_KNOWN_BY_TERMINAL = 0x33
+    SS_RETURN_ERROR = 0x34
+    SMS_RP_ERROR = 0x35
+    ERROR_REQUIRED_VALUES_ARE_MISSING = 0x36
+    USSD_RETURN_ERROR = 0x37
+    MULTIPLECARD_COMMANDS_ERROR = 0x38
+    INTERACTION_WITH_CALL_CONTROL_BY_USIM_PERMANENT_PROBLEM = 0x39
+    BEARER_INDEPENDENT_PROTOCOL_ERROR = 0x3A
+    ACCESS_TECHNOLOGY_UNABLE_TO_PROCESS_COMMAND = 0x3B
+    FRAMES_ERROR = 0x3C
+    MMS_ERROR = 0x3D
+
+
+class ResultExtra(IntEnum):
+    NO_SERVICE = 0x04
+
 
 class Event(IntEnum):
+    MT_CALL = 0x00
+    CALL_CONNECTED = 0x01
+    CALL_DISCONNECTED = 0x02
     LOCATION_STATUS = 0x03
+    USER_ACTIVITY = 0x04
+    IDLE_SCREEN_AVAILABLE = 0x05
+    CARD_READER_STATUS = 0x06
+    LANGUAGE_SELECTION = 0x07
+    BROWSER_TERMINATION = 0x08
     DATA_AVAILABLE = 0x09
     CHANNEL_STATUS = 0x0A
+    ACCESS_TECHNOLOGY_CHANGE = 0x0B
+    DISPLAY_PARAMETERS_CHANGED = 0x0C
+    LOCAL_CONNECTION = 0x0D
+    NETWORK_SEARCH_MODE_CHANGE = 0x0E
+    BROWSING_STATUS = 0x0F
+    FRAMES_INFORMATION_CHANGE = 0x10
+    IWLAN_ACCESS_STATUS = 0x11
+    NETWORK_REJECTION = 0x12
+    HCI_CONNECTIVITY_EVENT = 0x13
+    ACCESS_TECHNOLOGY_CHANGE_MULTIPLE = 0x14
+    CSG_CELL_SELECTION = 0x15
+    CONTACTLESS_STATE_REQUEST = 0x16
+    IMS_REGISTRATION = 0x17
+    IMS_INCOMING_DATA = 0x18
+    PROFILE_CONTAINER = 0x19
+    SECURED_PROFILE_CONTAINER = 0x1B
+    POLL_INTERVAL_NEGOTIATION = 0x1C
+    DATA_CONNECTION_STATUS_CHANGE = 0x1D
+
 
 class Command(IntEnum):
     REFRESH = 0x01
@@ -115,6 +183,7 @@ DnsServerAddress = CTLV.make_type('DnsServerAddress', 0x40, False, {'address_typ
 InterfaceTransportLevel = CTLV.make_type('InterfaceTransportLevel', 0x3C, False, {'protocol': (0, 1, int), 'port': (1, 2, int)})  # type: ignore
 OtherAddress = CTLV.make_type('OtherAddress', 0x3E, False, {'address_type': (0, 1, int), 'address': (1, ..., bytes)})  # type: ignore
 LocationStatus = CTLV.make_type('LocationStatus', 0x1B, True, {'status': (0, 1, int)})  # type: ignore
+
 
 class NetworkType(Enum):
     disconnected = auto()
@@ -631,7 +700,7 @@ def process_proactive_command(ret: bytes):
                 data = bytearray()
                 data += tags[CommandDetails]
                 data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)  # device identities: terminal to UICC
-                data += Result(result=RES_SUCCESS) # result: success
+                data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY) # result: success
                 data += Duration(unit=poll_interval_unit, interval=poll_interval_raw) # duration
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.SET_UP_EVENT_LIST:
@@ -640,10 +709,10 @@ def process_proactive_command(ret: bytes):
                 data = bytearray()
                 data += tags[CommandDetails]
                 data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                data += Result(result=RES_SUCCESS)
+                data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.PROVIDE_LOCAL_INFORMATION:
-                logger.info('processing PROVIDE LOCAL INFORMATION')
+                logger.info('processing PROVIDE LOCAL INFORMATION (%s)', f'{tags[CommandDetails].command_data:02X}')
                 match tags[CommandDetails].command_data:
                     case 0x00:  # location information
                         # LTE
@@ -651,16 +720,16 @@ def process_proactive_command(ret: bytes):
                         data += tags[CommandDetails]
                         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
                         if network_type is NetworkType.eutran:
-                            data += Result(result=RES_SUCCESS)
+                            data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                             data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci)  # E-UTRAN
                         else:
-                            data += Result(result=RES_COMMAND_CANNOT_BE_PROCESSED_CURRENTLY, extra=RES_EXTRA_NO_SERVICE)
+                            data += Result(result=ResultCode.TERMINAL_CURRENTLY_UNABLE_TO_PROCESS_COMMAND, extra=ResultExtra.NO_SERVICE)
                         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                     case 0x01:  # IMEI
                         data = bytearray()
                         data += tags[CommandDetails]
                         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                        data += Result(result=RES_SUCCESS)
+                        data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                         imei_array = bytearray.fromhex(('A' + imei).ljust(16, 'F'))
                         for i in range(len(imei_array)):
                             imei_array[i] = ((imei_array[i] & 0xF0) >> 4) | ((imei_array[i] & 0x0F) << 4)
@@ -672,10 +741,10 @@ def process_proactive_command(ret: bytes):
                         data = bytearray()
                         data += tags[CommandDetails]
                         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                        data += Result(result=RES_COMMAND_DATA_NOT_UNDERSTOOD)
+                        data += Result(result=ResultCode.COMMAND_DATA_NOT_UNDERSTOOD_BY_TERMINAL)
                         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.TIMER_MANAGEMENT:
-                logger.info('processing TIMER MANAGEMENT')
+                logger.info('processing TIMER MANAGEMENT (%s)', f'{tags[CommandDetails].command_data:02X}')
                 timer_id = tags[TimerIdentifier].identifier
                 match tags[CommandDetails].command_data:
                     case 0:  # start
@@ -685,7 +754,7 @@ def process_proactive_command(ret: bytes):
                         data = bytearray()
                         data += tags[CommandDetails]
                         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                        data += Result(result=RES_SUCCESS)
+                        data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
 
                     case 1:  # deactivate
@@ -695,14 +764,14 @@ def process_proactive_command(ret: bytes):
                             data = bytearray()
                             data += tags[CommandDetails]
                             data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                            data += Result(result=RES_SUCCESS)
+                            data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                             data += timer_value(remaining_time)
                             sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                         else:
                             data = bytearray()
                             data += tags[CommandDetails]
                             data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                            data += Result(result=RES_ACTION_IN_CONTRADICTION_WITH_CURRENT_TIMER_STATE)
+                            data += Result(result=ResultCode.ACTION_IN_CONTRADICTION_WITH_THE_CURRENT_TIMER_STATE)
                             sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                     case 2:  # get current value
                         if timers[timer_id].running:
@@ -710,28 +779,28 @@ def process_proactive_command(ret: bytes):
                             data = bytearray()
                             data += tags[CommandDetails]
                             data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                            data += Result(result=RES_SUCCESS)
+                            data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                             data += timer_value(remaining_time)
                             sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                         else:
                             data = bytearray()
                             data += tags[CommandDetails]
                             data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                            data += Result(result=RES_SUCCESS)
+                            data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                             sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                     case cmd:
                         logger.warning(f'Unknown timer management command {cmd:02X}')
                         data = bytearray()
                         data += tags[CommandDetails]
                         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                        data += Result(result=RES_COMMAND_DATA_NOT_UNDERSTOOD)
+                        data += Result(result=ResultCode.COMMAND_DATA_NOT_UNDERSTOOD_BY_TERMINAL)
                         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.OPEN_CHANNEL:
                 logger.info('processing OPEN CHANNEL')
 
                 port = None
                 proto = None
-                req_buffer_size = 1400
+                req_buffer_size = 1500
                 dns_requested = tags[CommandDetails].command_data & 0x08 != 0
                 connection_required = tags[CommandDetails].command_data & 0x01 != 0
                 ip_addr = None
@@ -782,7 +851,7 @@ def process_proactive_command(ret: bytes):
                 data = bytearray()
                 data += tags[CommandDetails]
                 data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                data += Result(result=RES_SUCCESS)
+                data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
 
                 # add channel status: link established
                 link_status = 0x80 if connection_required and ip_addr is not None else 0x00
@@ -811,7 +880,7 @@ def process_proactive_command(ret: bytes):
                 data = bytearray()
                 data += tags[CommandDetails]
                 data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                data += Result(result=RES_SUCCESS)
+                data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.SEND_DATA:
                 logger.info('Got SEND DATA command')
@@ -825,7 +894,7 @@ def process_proactive_command(ret: bytes):
                 data = bytearray()
                 data += tags[CommandDetails]
                 data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                data += Result(result=RES_SUCCESS)
+                data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.RECEIVE_DATA:
                 logger.info('Got RECEIVE DATA command')
@@ -856,14 +925,25 @@ def process_proactive_command(ret: bytes):
                 data = bytearray()
                 data += tags[CommandDetails]
                 data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-                data += Result(result=RES_SUCCESS)
+                data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 data += ChannelData(to_send)
                 data += ChannelDataLength(bytes((min(255, remaining),)))
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.REFRESH:
-                logger.info('Processing REFRESH')
-                card_reset_event.set()
-                # TODO: send code, check if the refresh is type 04
+                logger.info('Processing REFRESH (%s)', f'{tags[CommandDetails].command_data:02X}')
+                if tags[CommandDetails].command_data in (0x04, 0x09):
+                    if tags[CommandDetails].command_data == 0x04:
+                        logger.info('UICC reset requested')
+                    else:
+                        logger.info('eUICC Profile State Change')
+                    card_reset_event.set()
+                    data = bytearray()
+                    data += tags[CommandDetails]
+                    data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                    data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
+                    sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
+                else:
+                    raise CommandDataNotUnderstood()
             case cmd:
                 logger.warning(f'unknown proactive command {cmd:02X}')
                 raise CommandTypeNotUnderstood()
@@ -871,19 +951,19 @@ def process_proactive_command(ret: bytes):
         data = bytearray()
         data += tags[CommandDetails]
         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-        data += Result(result=RES_COMMAND_DATA_NOT_UNDERSTOOD)
+        data += Result(result=ResultCode.COMMAND_DATA_NOT_UNDERSTOOD_BY_TERMINAL)
         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
     except CommandTypeNotUnderstood:
         data = bytearray()
         data += tags[CommandDetails]
         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-        data += Result(result=RES_COMMAND_TYPE_NOT_UNDERSTOOD)
+        data += Result(result=ResultCode.COMMAND_TYPE_NOT_UNDERSTOOD_BY_TERMINAL)
         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
     except CommandCannotBeProcessedCurrently:
         data = bytearray()
         data += tags[CommandDetails]
         data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
-        data += Result(result=RES_COMMAND_CANNOT_BE_PROCESSED_CURRENTLY, extra=0x00)  # no specific cause can be given
+        data += Result(result=ResultCode.TERMINAL_CURRENTLY_UNABLE_TO_PROCESS_COMMAND, extra=0x00)  # no specific cause can be given
         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
 
 waiting_for_refresh = asyncio.Event()
@@ -961,7 +1041,6 @@ def get_euicc_info(cla):
 
     unused_bits = rsp_capabilities_raw[0]
     bitstring = '{:b}'.format(int.from_bytes(rsp_capabilities_raw[1:], byteorder='big') >> unused_bits).ljust(29, '0')
-    logger.info('rsp_capabilities: %s', rsp_capabilities_raw.hex())
 
     if is_sgp32:
         ipa_mode = ipa_modes[tags[b'\x90'][0][0]]
@@ -1125,9 +1204,9 @@ def get_profiles(cla: int):
             unused_bits = notification_event_raw[0]
             notification_event_bitstring = '{:b}'.format(int.from_bytes(notification_event_raw[1:], byteorder='big') >> unused_bits).ljust(4, '0')
             notification_events_list = []
-            for i in range(4):
+            for j in range(4):
                 if notification_event_bitstring[i] == '1':
-                    notification_events_list.append(notification_event_names[i])
+                    notification_events_list.append(notification_event_names[j])
             notification_events = ', '.join(notification_events_list)
             sm_dp_plus_server = profile[b'\xB6'][0][b'\x30'][0][b'\x81'][0].decode('utf-8')
 
@@ -1170,7 +1249,7 @@ def move_up_by(n: int):
     cursor = editscreen.getyx()
     pad_scroll = max(0, pad_scroll - n)
     if not (pad_scroll == last_line - (curses.LINES - PROMPT_LINES - 1) or last_line < curses.LINES - PROMPT_LINES - 1):
-        main_window.addstr(curses.LINES - PROMPT_LINES - 1, 1, ' scrolling ')
+        main_window.addstr(curses.LINES - PROMPT_LINES - 1, 1, f' scrolling ')
         main_window.noutrefresh()
         currently_scrolling = True
     editscreen.move(*cursor)
@@ -1185,6 +1264,7 @@ def move_down_by(n: int):
         main_window.hline(curses.LINES - PROMPT_LINES - 1, 0, curses.ACS_HLINE, curses.COLS)
         main_window.noutrefresh()
         currently_scrolling = False
+
     editscreen.move(*cursor)
     flush_screen()
 
