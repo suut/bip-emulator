@@ -71,7 +71,10 @@ elif args.reader == 'auto':
                     if j < len(atr.TB) - 1 and atr.TB[j + 1] is not None and atr.TB[j + 1] & 0x82 == 0x82:
                         if reader_with_euicc_card is None:
                             reader_with_euicc_card = i
+                    break
             conn.disconnect()
+            if reader_with_euicc_card is not None:
+                break
 
         except (smartcard.Exceptions.NoCardException, smartcard.Exceptions.CardConnectionException):
             pass
@@ -1608,6 +1611,14 @@ is_sgp22 = False
 is_sgp32 = False
 profile_switch_requested: bytes|None = None
 
+pin_names = {0x01: 'PIN1', 0x02: 'PIN2', 0x03: 'PIN3', 0x04: 'PIN4',
+             0x05: 'PIN5', 0x06: 'PIN6', 0x07: 'PIN7', 0x08: 'PIN8',
+             0x0A: 'ADM1', 0x0B: 'ADM2', 0x0C: 'ADM3', 0x0D: 'ADM4',
+             0x0E: 'ADM5', 0x11: 'UNIV', 0x81: '2PIN1', 0x82: '2PIN2',
+             0x83: '2PIN3', 0x84: '2PIN4', 0x85: '2PIN5', 0x86: '2PIN6',
+             0x87: '2PIN7', 0x88: '2PIN8', 0x8A: 'ADM6', 0x8B: 'ADM7',
+             0x8C: 'ADM8', 0x8D: 'ADM9', 0x8E: 'ADM10'}
+
 async def main():
     global negotiated_poll_interval, is_thales, cla_ipae, cla_isdr, has_5g, is_sgp22, is_sgp32, profile_switch_requested
 
@@ -1665,7 +1676,7 @@ async def main():
         needs_verification = False
         for i, pin in enumerate(pin_status_template.get(b'\x83', []), start=1):
             enabled = (pin_statuses & (1 << (ps_num_bytes * 8 - i))) != 0
-            logger.info('PIN%d (%s) enabled: %s', i, pin.hex(), enabled)
+            logger.info('%s enabled: %s', pin_names[pin[0]], enabled)
             if pin[0] == 0x01 and enabled:
                 needs_verification = True
 
