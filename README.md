@@ -62,6 +62,7 @@ The commands are:
 * [network](#network)
 * [profile](#profile)
 * [reset](#reset)
+* [poll](#poll)
 
 Each command and subcommand can take the `-h` argument in order to print its help text.
 
@@ -78,12 +79,12 @@ This prints the list of commands.
 Manage the cellular network as seen by the SIM.
 
 Subcommands:
-* [status](#status)
-* [connect](#connect)
-* [disconnect](#disconnect)
-* [reject](#reject)
+* [status](#network-status)
+* [connect](#network-connect)
+* [disconnect](#network-disconnect)
+* [reject](#network-reject)
 
-#### `status`
+#### `network status`
 
 This prints the currently attached network, which is one of:
 * disconnected
@@ -96,15 +97,15 @@ The support for the various network types depends on the SIM card and the curren
 
 The operator (MCC and MNC) as well as the currently attached cell is also printed if the network is not disconnect. 
 
-#### `connect`
+#### `network connect`
 
 This command simulates an attachment to the network after having been disconnected.
 
-#### `disconnect`
+#### `network disconnect`
 
 This command simulates a disconnection from the network.
 
-#### `reject`
+#### `network reject`
 
 This command simulates a network rejection event. It is possible to wait until after a profile change before sending the event.
 
@@ -120,14 +121,14 @@ This is useful for testing either fallback/rollback mechanism of an eUICC:
 Manage profiles on a SGP.22/SGP.32 eUICC.
 
 Subcommands:
-* [list](#list)
-* [switch](#switch)
+* [list](#profile-list)
+* [switch](#profile-switch)
 
-#### `list`
+#### `profile list`
 
 List some information about the profiles on the eUICC. The list of profiles is read at reset so it might not be up to date if a new profile was installed on the eUICC since then.
 
-#### `switch`
+#### `profile switch`
 
 Switch to another profile, given by its ICCID. The target profile must be disabled.
 
@@ -136,3 +137,7 @@ Switch to another profile, given by its ICCID. The target profile must be disabl
 Reset the UICC, which triggers a re-reading of the SGP.22/SGP.32 information and the list of profiles.
 
 A reset will automatically happen if the SIM card requests one, for instance if there was a profile switch triggered by the eIM on a SGP.32 eUICC.
+
+### `poll`
+
+Ask a Thales IPAe to poll for changes (this will cause the IPAe to go contact the eIM soon-ish). This is only for Thales SGP.32 eUICCs and the local APDU polling must be enabled (the Polling local interface setting must be set to `ENABLED_BY_APDU_AND_STK_MENU` or `ENABLED_BY_APDU`).
