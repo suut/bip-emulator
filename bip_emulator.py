@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger('bip-emulator')
 
-from time import time
+from time import time, sleep
 import socket
 
 from enum import IntEnum, Enum, auto
@@ -1954,5 +1954,9 @@ def run_main(stdscr: curses.window):
 
     asyncio.run(main(), debug=False)
 
-curses.wrapper(run_main)
-os._exit(0)
+try:
+    curses.wrapper(run_main)
+except Exception as e:
+    traceback.print_exception(e)
+finally:
+    os._exit(0)
