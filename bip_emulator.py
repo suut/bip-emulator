@@ -38,6 +38,7 @@ parser.add_argument('--imei', default='356358231187560', help='IMEI (default %(d
 parser.add_argument('-p', '--pin', default=None, help='PIN code')
 parser.add_argument('--network', choices=('none', '2G', '3G', '4G', '5G'), default='4G', help='Network type (default %(default)s; choices %(choices)s)')
 parser.add_argument('-r', '--reader', metavar='N', default='auto', help='Reader index or name (default %(default)s, give the value \'list\' to list readers)')
+parser.add_argument('-d', '--debug', action='store_true', help='Show debug messages')
 args = parser.parse_args()
 
 if args.pin is not None and len(args.pin) > 8:
@@ -1590,8 +1591,9 @@ async def cli():
     switch_parser = profile_subparsers.add_parser('switch', exit_on_error=False, color=False, help='Switch the activated profile')
     switch_parser.add_argument('iccid', metavar='ICCID', help='The ICCID of the profile to switch to')
 
-    network_parser = subparsers.add_parser('network', exit_on_error=False, color=False, help='Manage the network')
     poll_parser = subparsers.add_parser('poll', help='Force polling on a Thales eUICC', exit_on_error=False, color=False)
+
+    network_parser = subparsers.add_parser('network', exit_on_error=False, color=False, help='Manage the network')
     network_subparsers = network_parser.add_subparsers(dest='network_command')
     disconnect_parser = network_subparsers.add_parser('disconnect', exit_on_error=False, color=False, help='Disconnect from the network')
     reject_parser = network_subparsers.add_parser('reject', exit_on_error=False, color=False, help='Send or schedule a network rejection event')
@@ -1950,7 +1952,7 @@ def run_main(stdscr: curses.window):
         def flush(self):
             flush_screen()
 
-    logging.basicConfig(stream=TerminalIO(), level=logging.DEBUG)
+    logging.basicConfig(stream=TerminalIO(), level=logging.DEBUG if args.debug else logging.INFO)
 
     asyncio.run(main(), debug=False)
 
