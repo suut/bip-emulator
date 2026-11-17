@@ -99,9 +99,66 @@ EF_LOCI = bytes.fromhex('6F7E')
 EF_PSLOCI = bytes.fromhex('6F73')
 EF_EPSLOCI = bytes.fromhex('6FE3')
 
-ID_TERMINAL = 0x82
-ID_UICC = 0x81
-ID_CHANNEL = 0x20
+class ACT(IntEnum):
+    GSM = 0x00
+    UTRAN = 0x03
+    EUTRAN = 0x08
+    NR = 0x0A
+    # TODO: put the rest
+
+class RegistrationType(IntEnum):
+    EPS_ATTACH = 0x09
+    # TODO: put the rest
+
+
+class RegistrationRejectionCode(IntEnum):
+    PLMN_NOT_ALLOWED = 0x0B  # E-UTRAN
+    # TODO: find the rest as Reject Cause information element in TS 24.008 for GERAN/UTRAN
+    # TODO: find the rest as EMM Cause information element in TS 24.301 for E-UTRAN
+    # TODO: find the rest as 5GMM Cause information element in TS 24.501 for NG-RAN
+
+class DeviceIdentity(IntEnum):
+    KEYPAD = 0x01
+    DISPLAY = 0x02
+    EARPIECE = 0x03
+    ADDITIONAL_CARD_READER   = 0x10
+    ADDITIONAL_CARD_READER_0 = 0x10
+    ADDITIONAL_CARD_READER_1 = 0x11
+    ADDITIONAL_CARD_READER_2 = 0x12
+    ADDITIONAL_CARD_READER_3 = 0x13
+    ADDITIONAL_CARD_READER_4 = 0x14
+    ADDITIONAL_CARD_READER_5 = 0x15
+    ADDITIONAL_CARD_READER_6 = 0x16
+    ADDITIONAL_CARD_READER_7 = 0x17
+    CHANNEL = 0x20
+    CHANNEL_0 = 0x21
+    CHANNEL_1 = 0x21
+    CHANNEL_2 = 0x22
+    CHANNEL_3 = 0x23
+    CHANNEL_4 = 0x24
+    CHANNEL_5 = 0x25
+    CHANNEL_6 = 0x26
+    CHANNEL_7 = 0x27
+    ECAT_CLIENT = 0x30
+    ECAT_CLIENT_1 = 0x31
+    ECAT_CLIENT_2 = 0x32
+    ECAT_CLIENT_3 = 0x33
+    ECAT_CLIENT_4 = 0x34
+    ECAT_CLIENT_5 = 0x35
+    ECAT_CLIENT_6 = 0x36
+    ECAT_CLIENT_7 = 0x37
+    ECAT_CLIENT_8 = 0x38
+    ECAT_CLIENT_9 = 0x39
+    ECAT_CLIENT_10 = 0x3A
+    ECAT_CLIENT_11 = 0x3B
+    ECAT_CLIENT_12 = 0x3C
+    ECAT_CLIENT_13 = 0x3D
+    ECAT_CLIENT_14 = 0x3E
+    ECAT_CLIENT_15 = 0x3F
+    UICC = 0x81
+    TERMINAL = 0x82
+    NETWORK = 0x83
+
 
 class ResultCode(IntEnum):
     # 0X and 1X: command has been performed
@@ -233,7 +290,7 @@ class Command(IntEnum):
 
 
 CommandDetails = CTLV.make_type('CommandDetails', 0x01, True, {'command_number': (0, 1, int), 'command': (1, 1, int), 'command_data': (2, 1, int)})  # type: ignore
-DeviceIdentity = CTLV.make_type('DeviceIdentity', 0x02, False, {'source': (0, 1, int), 'destination': (1, 1, int)})  # type: ignore
+DeviceIdentities = CTLV.make_type('DeviceIdentities', 0x02, False, {'source': (0, 1, int), 'destination': (1, 1, int)})  # type: ignore
 Result = CTLV.make_type('Result', 0x03, True, {'result': (0, 1, int), 'extra': (1, ..., int)})  # type: ignore
 Duration = CTLV.make_type('Duration', 0x04, False, {'unit': (0, 1, int), 'interval': (1, 1, int)})  # type: ignore
 LocalInformation = CTLV.make_type('LocalInformation', 0x13, False)
@@ -250,7 +307,10 @@ DnsServerAddress = CTLV.make_type('DnsServerAddress', 0x40, False, {'address_typ
 InterfaceTransportLevel = CTLV.make_type('InterfaceTransportLevel', 0x3C, False, {'protocol': (0, 1, int), 'port': (1, 2, int)})  # type: ignore
 OtherAddress = CTLV.make_type('OtherAddress', 0x3E, False, {'address_type': (0, 1, int), 'address': (1, ..., bytes)})  # type: ignore
 LocationStatus = CTLV.make_type('LocationStatus', 0x1B, True, {'status': (0, 1, int)})  # type: ignore
-
+TrackingAreaIdentification = CTLV.make_type('TrackingAreaIdentification', 0x7D, False, {'mcc_mnc': (0, 3, bytes), 'tac': (3, ..., bytes)})  # type: ignore
+UpdateAttachRegistrationType = CTLV.make_type('UpdateAttachRegistrationType', 0x74, False, {'type': (0, 1, int)})  # type: ignore
+RejectionCauseCode = CTLV.make_type('RejectionCauseCode', 0x75, False, {'code': (0, 1, int)})  # type: ignore
+AccessTechnology = CTLV.make_type('AccessTechnology', 0x3F, False, {'technologies': (0, ..., bytes)})
 
 class NetworkType(Enum):
     disconnected = auto()
@@ -410,6 +470,15 @@ def fetch():
     return sc.transmit(cla=0x80, ins=0x12, p1=0x00, p2=0x00, le=sc.refresh_needed)
 
 
+async def show_exceptions(coro):
+    try:
+        await coro
+    except asyncio.CancelledError:
+        logger.debug('Task %s cancelled', coro)
+    except BaseException as e:
+        logger.error('Exception running %s:', coro, exc_info=e)
+        raise e from None
+
 class Timer:
     def __init__(self, timer_id, timer_val):
         self.timer_id = timer_id
@@ -421,7 +490,7 @@ class Timer:
         self.task = None
 
     def start_timer(self):
-        self.task = asyncio.create_task(self.run_timer())
+        self.task = asyncio.create_task(show_exceptions(self.run_timer()), eager_start=True)
 
     @property
     def remaining_time(self):
@@ -434,7 +503,6 @@ class Timer:
             return self.timer_value
 
     async def run_timer(self):
-        global timer_value
         logger.info('Starting timer for %d seconds', self.timer_value)
 
         self.start_time = time()
@@ -450,19 +518,10 @@ class Timer:
         self.running = False
         logger.info('Sending ENVELOPE (TIMER EXPIRATION)')
         data = bytearray()
-        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
+        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC, cr=True)
         data += TimerIdentifier(identifier=self.timer_id, cr=True)
         data += TimerValue((0x00, 0x00, 0x00), cr=True)
-
-        while True:
-            try:
-                sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD7', data))
-                break
-            except APDUException as e:
-                if e.sw1 == 0x93 and e.sw2 == 0x00:
-                    await asyncio.sleep(5)
-                else:
-                    raise e
+        await send_timer_expiration(data)
         logger.debug('Event sent')
 
     def is_expired(self):
@@ -488,6 +547,25 @@ def encode_timer_value(t):
 
     return bytes.fromhex(str(hours).rjust(2, '0')[::-1] + str(minutes).rjust(2, '0')[::-1] + str(seconds).rjust(2, '0')[::-1])
 
+
+async def send_with_retry(data: bytes):
+    while True:
+        try:
+            sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=data)
+        except APDUException as e:
+            if e.sw1 == 0x93 and e.sw2 == 0x00:
+                await asyncio.sleep(1)
+            else:
+                raise e from None
+        else:
+            break
+
+async def send_event(data: bytes):
+    await send_with_retry(encode_tlv(b'\xD6', data))
+
+
+async def send_timer_expiration(data: bytes):
+    await send_with_retry(encode_tlv(b'\xD7', data))
 
 
 class Channel:
@@ -539,7 +617,7 @@ class UDPChannel(Channel):
         assert self.socket is not None and self.addr is not None
         self.socket.connect((self.addr, self.port))
         self.connected = True
-        self.task = asyncio.create_task(self.run_task())
+        self.task = asyncio.create_task(show_exceptions(self.run_task()))
 
     def write(self, data, now):
         if len(data) == 0 or not self.connected:
@@ -563,6 +641,7 @@ class UDPChannel(Channel):
             self.reader_task.cancel()
             self.writer_task.cancel()
             self.reader_thread_task.cancel()
+            raise
 
     async def run_reader(self):
         while True:
@@ -573,10 +652,10 @@ class UDPChannel(Channel):
             logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Data available)')
             data = bytearray()
             data += EventList((Event.DATA_AVAILABLE,), cr=True)
-            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
+            data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC, cr=True)
             data += ChannelStatus(status=self.channel_id | 0x80, extra=0x00, cr=True)  # TODO: check in the test spec
             data += ChannelDataLength(length=min(255, datagram_length), cr=True)
-            sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
+            await send_event(data)
 
     async def run_writer(self):
         while True:
@@ -601,6 +680,22 @@ class TCPChannel(Channel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.send_event = asyncio.Event()
+        self.reader: asyncio.StreamReader|None = None
+        self.writer: asyncio.StreamWriter|None = None
+        self.reader_task = None
+        self.writer_task = None
+        self.reader: asyncio.StreamReader|None = None
+        self.writer: asyncio.StreamWriter|None = None
+
+    def close(self):
+        self.connected = False
+        if self.writer is not None:
+            if not self.writer.is_closing():
+                if self.writer.can_write_eof():
+                    self.writer.write_eof()
+                self.writer.close()
+        if self.task is not None:
+            self.task.cancel()
 
     def write(self, data, now):
         self.send_buffer += data
@@ -624,11 +719,10 @@ class TCPChannel(Channel):
             logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Data available)')
             data = bytearray()
             data += EventList((Event.DATA_AVAILABLE,), cr=True)
-            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
+            data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC, cr=True)
             data += ChannelStatus(status=self.channel_id | 0x80, extra=0x00, cr=True)  # TODO: check in the test spec
             data += ChannelDataLength(length=min(255, len(self.recv_buffer)), cr=True)
-            sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
-            await asyncio.sleep(0)
+            await send_event(data)
 
         # TODO: wait for all the data to be read then send the event
         await asyncio.sleep(10)  # give an opportunity to process the proactive commands first
@@ -637,15 +731,15 @@ class TCPChannel(Channel):
         logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Channel status)')
         data = bytearray()
         data += EventList((Event.CHANNEL_STATUS,), cr=True)
-        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
+        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC, cr=True)
         data += ChannelStatus(status=self.channel_id, extra=0x00, cr=True)  # TODO: check in the test spec
-        sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
+        await send_event(data)
 
 
     async def run_task(self):
-        reader, writer = await asyncio.open_connection(sock=self.socket)
-        self.reader_task = asyncio.create_task(self.run_reader(reader))
-        self.writer_task = asyncio.create_task(self.run_writer(writer))
+        self.reader, self.writer = await asyncio.open_connection(sock=self.socket)
+        self.reader_task = asyncio.create_task(self.run_reader(self.reader))
+        self.writer_task = asyncio.create_task(self.run_writer(self.writer))
         try:
             done, pending = await asyncio.wait((self.reader_task, self.writer_task), return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
@@ -653,13 +747,15 @@ class TCPChannel(Channel):
         except asyncio.CancelledError:
             self.reader_task.cancel()
             self.writer_task.cancel()
+            self.close()
+            raise
 
     def connect(self):
         assert self.socket is not None and self.addr is not None
         self.socket.connect((self.addr, self.port))
         self.socket.settimeout(0.5)
         self.connected = True
-        self.task = asyncio.create_task(self.run_task())
+        self.task = asyncio.create_task(show_exceptions(self.run_task()), eager_start=True)
 
 
 def close_all_tasks():
@@ -761,7 +857,7 @@ def process_proactive_command(ret: bytes):
                 # Construct the response
                 data = bytearray()
                 data += tags[CommandDetails]
-                data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)  # device identities: terminal to UICC
+                data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)  # device identities: terminal to UICC
                 data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY) # result: success
                 data += Duration(unit=poll_interval_unit, interval=poll_interval_raw) # duration
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
@@ -770,7 +866,7 @@ def process_proactive_command(ret: bytes):
                 requested_event_list = [*tags[EventList].data]
                 data = bytearray()
                 data += tags[CommandDetails]
-                data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                 data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.PROVIDE_LOCAL_INFORMATION:
@@ -780,7 +876,7 @@ def process_proactive_command(ret: bytes):
                         # LTE
                         data = bytearray()
                         data += tags[CommandDetails]
-                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                         if network_type is NetworkType.eutran:
                             data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                             data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci)  # E-UTRAN
@@ -790,7 +886,7 @@ def process_proactive_command(ret: bytes):
                     case 0x01:  # IMEI
                         data = bytearray()
                         data += tags[CommandDetails]
-                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                         data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                         imei_array = bytearray.fromhex(('A' + imei).ljust(16, 'F'))
                         for i in range(len(imei_array)):
@@ -802,7 +898,7 @@ def process_proactive_command(ret: bytes):
                         logger.warning(f'Unknown local information type {info_type:02X}')
                         data = bytearray()
                         data += tags[CommandDetails]
-                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                         data += Result(result=ResultCode.COMMAND_DATA_NOT_UNDERSTOOD_BY_TERMINAL)
                         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.TIMER_MANAGEMENT:
@@ -815,7 +911,7 @@ def process_proactive_command(ret: bytes):
                         timers[timer_id].start_timer()
                         data = bytearray()
                         data += tags[CommandDetails]
-                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                         data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
 
@@ -825,14 +921,14 @@ def process_proactive_command(ret: bytes):
                             remaining_time = encode_timer_value(timers[timer_id].remaining_time)
                             data = bytearray()
                             data += tags[CommandDetails]
-                            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                            data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                             data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
-                            data += timer_value(remaining_time)
+                            data += TimerValue(remaining_time)
                             sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                         else:
                             data = bytearray()
                             data += tags[CommandDetails]
-                            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                            data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                             data += Result(result=ResultCode.ACTION_IN_CONTRADICTION_WITH_THE_CURRENT_TIMER_STATE)
                             sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                     case 2:  # get current value
@@ -840,21 +936,21 @@ def process_proactive_command(ret: bytes):
                             remaining_time = encode_timer_value(timers[timer_id].remaining_time)
                             data = bytearray()
                             data += tags[CommandDetails]
-                            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                            data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                             data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
-                            data += timer_value(remaining_time)
+                            data += TimerValue(remaining_time)
                             sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                         else:
                             data = bytearray()
                             data += tags[CommandDetails]
-                            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                            data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                             data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                             sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                     case cmd:
                         logger.warning(f'Unknown timer management command {cmd:02X}')
                         data = bytearray()
                         data += tags[CommandDetails]
-                        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                         data += Result(result=ResultCode.COMMAND_DATA_NOT_UNDERSTOOD_BY_TERMINAL)
                         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.OPEN_CHANNEL:
@@ -912,7 +1008,7 @@ def process_proactive_command(ret: bytes):
 
                 data = bytearray()
                 data += tags[CommandDetails]
-                data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                 data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
 
                 # add channel status: link established
@@ -933,21 +1029,21 @@ def process_proactive_command(ret: bytes):
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.CLOSE_CHANNEL:
                 logger.info('Processing CLOSE CHANNEL')
-                assert ID_CHANNEL + 1 <= tags[DeviceIdentity].destination <= ID_CHANNEL + 7
-                channel_number = tags[DeviceIdentity].destination - ID_CHANNEL
+                assert DeviceIdentity.CHANNEL + 1 <= tags[DeviceIdentities].destination <= DeviceIdentity.CHANNEL + 7
+                channel_number = tags[DeviceIdentities].destination - DeviceIdentity.CHANNEL
                 if channels[channel_number - 1] is not None:
                     channels[channel_number - 1].close()
                     channels[channel_number - 1] = None
 
                 data = bytearray()
                 data += tags[CommandDetails]
-                data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                 data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.SEND_DATA:
                 logger.info('Got SEND DATA command')
-                assert ID_CHANNEL + 1 <= tags[DeviceIdentity].destination <= ID_CHANNEL + 7
-                channel_id = tags[DeviceIdentity].destination - ID_CHANNEL
+                assert DeviceIdentity.CHANNEL + 1 <= tags[DeviceIdentities].destination <= DeviceIdentity.CHANNEL + 7
+                channel_id = tags[DeviceIdentities].destination - DeviceIdentity.CHANNEL
                 channel = channels[channel_id - 1]
                 if channel is None:
                     raise CommandDataNotUnderstood()
@@ -955,13 +1051,13 @@ def process_proactive_command(ret: bytes):
                 channel.write(tags[ChannelData].data, tags[CommandDetails].command_data & 0x01)
                 data = bytearray()
                 data += tags[CommandDetails]
-                data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                 data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.RECEIVE_DATA:
                 logger.info('Got RECEIVE DATA command')
-                assert ID_CHANNEL + 1 <= tags[DeviceIdentity].destination <= ID_CHANNEL + 7
-                channel_id = tags[DeviceIdentity].destination - ID_CHANNEL
+                assert DeviceIdentity.CHANNEL + 1 <= tags[DeviceIdentities].destination <= DeviceIdentity.CHANNEL + 7
+                channel_id = tags[DeviceIdentities].destination - DeviceIdentity.CHANNEL
                 channel = channels[channel_id - 1]
                 if channel is None:
                     raise CommandDataNotUnderstood()
@@ -986,7 +1082,7 @@ def process_proactive_command(ret: bytes):
                 logger.debug('remaining length: %d', remaining)
                 data = bytearray()
                 data += tags[CommandDetails]
-                data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                 data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 data += ChannelData(to_send)
                 data += ChannelDataLength(bytes((min(255, remaining),)))
@@ -1001,7 +1097,7 @@ def process_proactive_command(ret: bytes):
                     card_reset_event.set()
                     data = bytearray()
                     data += tags[CommandDetails]
-                    data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                    data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                     data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                     sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
                 else:
@@ -1010,7 +1106,7 @@ def process_proactive_command(ret: bytes):
                 logger.info('Processing SET UP MENU')
                 data = bytearray()
                 data += tags[CommandDetails]
-                data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+                data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
                 data += Result(result=ResultCode.COMMAND_PERFORMED_SUCCESSFULLY)
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
 
@@ -1020,19 +1116,19 @@ def process_proactive_command(ret: bytes):
     except CommandDataNotUnderstood:
         data = bytearray()
         data += tags[CommandDetails]
-        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
         data += Result(result=ResultCode.COMMAND_DATA_NOT_UNDERSTOOD_BY_TERMINAL)
         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
     except CommandTypeNotUnderstood:
         data = bytearray()
         data += tags[CommandDetails]
-        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
         data += Result(result=ResultCode.COMMAND_TYPE_NOT_UNDERSTOOD_BY_TERMINAL)
         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
     except CommandCannotBeProcessedCurrently:
         data = bytearray()
         data += tags[CommandDetails]
-        data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC)
+        data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
         data += Result(result=ResultCode.TERMINAL_CURRENTLY_UNABLE_TO_PROCESS_COMMAND, extra=0x00)  # no specific cause can be given
         sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
 
@@ -1381,9 +1477,9 @@ PROMPT_LINES = 6
 cli_line: str|None = None
 cli_line_processed_event = threading.Event()
 cli_line_available_event = asyncio.Event()
-is_thales = False
-last_line = 0
-currently_scrolling = False
+is_thales: bool = False
+last_line: int = 0
+currently_scrolling: bool = False
 
 def move_up_by(n: int):
     global pad_scroll, currently_scrolling
@@ -1463,34 +1559,45 @@ def print_screen(*args, end='\n', flush=True):
     if flush:
         flush_screen()
 
+
+class CLIArgumentParser(argparse.ArgumentParser):
+    def exit(self, status: int = 0, message: str | None = None):
+        if message is not None:
+            print_screen(message)
+        sys.exit(status)
+
+    @staticmethod
+    def error(message):
+        print_screen(message)
+        sys.exit(2)
+
+    def print_help(self, file = None) -> None:
+        print_screen(self.format_help(), end='')
+
+
 async def cli():
-    global network_type, profile_switch_requested
+    global network_type, profile_switch_requested, profile_state_changed, network_reject_scheduled
 
-    cli_parser = argparse.ArgumentParser(prog='', description='Modem emulator', exit_on_error=False, add_help=False, color=False)
+    cli_parser = CLIArgumentParser(prog='', description='Modem emulator', exit_on_error=False, add_help=False, color=False)
     subparsers = cli_parser.add_subparsers(dest='command')
-    exit_parser = subparsers.add_parser('exit', add_help=False, exit_on_error=False, color=False, help='Exit the program')
-    help_parser = subparsers.add_parser('help', add_help=False, exit_on_error=False, color=False, help='Get this message')
-    reset_parser = subparsers.add_parser('reset', add_help=False, exit_on_error=False, color=False, help='Reset the UICC')
-    profile_parser = subparsers.add_parser('profile', add_help=False, exit_on_error=False, color=False, help='Manage eUICC profiles')
+    exit_parser = subparsers.add_parser('exit', exit_on_error=False, color=False, help='Exit the program')
+    help_parser = subparsers.add_parser('help', exit_on_error=False, color=False, help='Get this message')
+    reset_parser = subparsers.add_parser('reset', exit_on_error=False, color=False, help='Reset the UICC')
+    profile_parser = subparsers.add_parser('profile', exit_on_error=False, color=False, help='Manage eUICC profiles')
 
-    profile_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
     profile_subparsers = profile_parser.add_subparsers(dest='profile_command')
-    profile_subparsers.add_parser('list', add_help=False, exit_on_error=False, color=False, help='List installed profiles')
-    switch_parser = profile_subparsers.add_parser('switch', add_help=False, exit_on_error=False, color=False, help='Switch the activated profile')
-    switch_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
+    profile_subparsers.add_parser('list', exit_on_error=False, color=False, help='List installed profiles')
+    switch_parser = profile_subparsers.add_parser('switch', exit_on_error=False, color=False, help='Switch the activated profile')
     switch_parser.add_argument('iccid', metavar='ICCID', help='The ICCID of the profile to switch to')
 
-    network_parser = subparsers.add_parser('network', add_help=False, exit_on_error=False, color=False, help='Manage the network')
-    network_parser.add_argument('-h', '--help', action='store_true')
-    poll_parser = subparsers.add_parser('poll', help='Force polling on a Thales eUICC', add_help=False, exit_on_error=False, color=False)
-    poll_parser.add_argument('-h', '--help', action='store_true')
+    network_parser = subparsers.add_parser('network', exit_on_error=False, color=False, help='Manage the network')
+    poll_parser = subparsers.add_parser('poll', help='Force polling on a Thales eUICC', exit_on_error=False, color=False)
     network_subparsers = network_parser.add_subparsers(dest='network_command')
-    disconnect_parser = network_subparsers.add_parser('disconnect', add_help=False, exit_on_error=False, color=False, help='Disconnect from the network')
-    disconnect_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
-    connect_parser = network_subparsers.add_parser('connect', add_help=False, exit_on_error=False, color=False, help='Connect to the network')
-    connect_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
-    status_parser = network_subparsers.add_parser('status', add_help=False, exit_on_error=False, color=False, help='Get the current network status')
-    status_parser.add_argument('-h', '--help', action='store_true', help='Display this message')
+    disconnect_parser = network_subparsers.add_parser('disconnect', exit_on_error=False, color=False, help='Disconnect from the network')
+    reject_parser = network_subparsers.add_parser('reject', exit_on_error=False, color=False, help='Send or schedule a network rejection event')
+    reject_parser.add_argument('--after-profile-state-change', action='store_true', help='Schedule the network rejection after a profile state change')
+    connect_parser = network_subparsers.add_parser('connect', exit_on_error=False, color=False, help='Connect to the network')
+    status_parser = network_subparsers.add_parser('status', exit_on_error=False, color=False, help='Get the current network status')
     while True:
         await cli_line_available_event.wait()
         cli_line_available_event.clear()
@@ -1504,29 +1611,23 @@ async def cli():
         else:
             match args.command:
                 case 'profile':
-                    if args.help and args.profile_command is None:
-                        print_screen(profile_parser.format_help(), end='')
-                    else:
-                        match args.profile_command:
-                            case 'list':
-                                print_screen('Note: reset the eUICC to re-read the list of profiles as it might have changed since then')
-                                for i, profile in enumerate(profiles, start=1):
-                                    print_screen('Profile', i)
-                                    print_screen('\tICCID:', profile.iccid)
-                                    print_screen('\tService provider name:', profile.service_provider_name)
-                                    print_screen('\tProfile name:', profile.profile_name)
-                                    print_screen('\tProfile enabled:', profile.enabled)
-                            case 'switch':
-                                if args.help:
-                                    print_screen(switch_parser.format_help(), end='')
-                                else:
-                                    for profile in profiles:
-                                        if profile.iccid == args.iccid:
-                                            profile_switch_requested = profile.iccid_raw
-                                            card_reset_event.set()
-                                            break
-                                    else:
-                                        print_screen('Error: profile', args.iccid, 'not found')
+                    match args.profile_command:
+                        case 'list':
+                            print_screen('Note: reset the eUICC to re-read the list of profiles as it might have changed since then')
+                            for i, profile in enumerate(profiles, start=1):
+                                print_screen('Profile', i)
+                                print_screen('\tICCID:', profile.iccid)
+                                print_screen('\tService provider name:', profile.service_provider_name)
+                                print_screen('\tProfile name:', profile.profile_name)
+                                print_screen('\tProfile enabled:', profile.enabled)
+                        case 'switch':
+                            for profile in profiles:
+                                if profile.iccid == args.iccid:
+                                    profile_switch_requested = profile.iccid_raw
+                                    card_reset_event.set()
+                                    break
+                            else:
+                                print_screen('Error: profile', args.iccid, 'not found')
                 case 'reset':
                     print_screen('Resetting the card')
                     card_reset_event.set()
@@ -1535,73 +1636,64 @@ async def cli():
                 case 'exit':
                     return
                 case 'network':
-                    if args.help and args.network_command is None:
-                        print_screen(network_parser.format_help(), end='')
-                    else:
-                        match args.network_command:
-                            case 'status':
-                                if args.help:
-                                    print_screen(status_parser.format_help(), end='')
-                                else:
-                                    if network_type is not NetworkType.disconnected:
-                                        print_screen('Connected to the network, network type', network_friendly_names[network_type])
-                                    else:
-                                        print_screen('Disconnected from the network')
-                                    print_screen('IMEI:', imei)
-                                    if network_type is NetworkType.eutran:
-                                        print_screen('Operator:', location.mcc, location.mnc)
-                            case 'disconnect':
-                                if args.help:
-                                    print_screen(disconnect_parser.format_help(), end='')
-                                else:
-                                    if network_type is NetworkType.disconnected:
-                                        print_screen('Already disconnected')
-                                    else:
-                                        print_screen('Disconnecting from network')
-                                        await waiting_for_refresh.wait()
-                                        network_type = NetworkType.disconnected
-                                        update_location_no_service()
-                                        if Event.LOCATION_STATUS in requested_event_list:
-                                            logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
-                                            data = bytearray()
-                                            data += EventList((Event.LOCATION_STATUS,), cr=True)
-                                            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
-                                            data += LocationStatus(status=0x02, cr=True)  # No service
-                                            sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
-                                        else:
-                                            logger.warning('SIM did not set up Location status in the event list')
-                            case 'connect':
-                                if args.help:
-                                    print_screen(connect_parser.format_help(), end='')
-                                else:
-                                    if network_type is not NetworkType.disconnected:
-                                        print_screen('Already connected')
-                                    else:
-                                        print_screen('Connecting to network')
-                                        await waiting_for_refresh.wait()
-                                        network_type = NetworkType.eutran
-                                        update_location_eutran(location)
-                                        if Event.LOCATION_STATUS in requested_event_list:
-                                            logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
-                                            data = bytearray()
-                                            data += EventList((Event.LOCATION_STATUS,), cr=True)
-                                            data += DeviceIdentity(source=ID_TERMINAL, destination=ID_UICC, cr=True)
-                                            data += LocationStatus(status=0x00, cr=True)  # Service available
-                                            data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci, cr=True)  # E-UTRAN
-                                            sc.transmit(cla=0x80, ins=0xC2, p1=0x00, p2=0x00, data=encode_tlv(b'\xD6', data))
-                                        else:
-                                            logger.warning('SIM did not set up Location status in the event list')
-                case 'poll':
-                    if args.help:
-                        print_screen(poll_parser.format_help(), end='')
-                    else:
-                        if not is_thales:
-                            print_screen('Not a Thales eUICC')
-                        else:
-                            if force_polling(cla_ipae):
-                                print_screen('Force polling success')
+                    match args.network_command:
+                        case 'reject':
+                            if args.after_profile_state_change:
+                                logger.info('Scheduling a network rejection event after a profile state change')
+                                network_reject_scheduled = True
                             else:
-                                print_screen('Force polling failed; APDU polling is disabled or the IPAe is busy')
+                                print_screen('Not implemented')
+                        case 'status':
+                            if network_type is not NetworkType.disconnected:
+                                print_screen('Connected to the network, network type', network_friendly_names[network_type])
+                            else:
+                                print_screen('Disconnected from the network')
+                            print_screen('IMEI:', imei)
+                            if network_type is NetworkType.eutran:
+                                print_screen('Operator:', location.mcc, location.mnc)
+                        case 'disconnect':
+                            if network_type is NetworkType.disconnected:
+                                print_screen('Already disconnected')
+                            else:
+                                print_screen('Disconnecting from network')
+                                await waiting_for_refresh.wait()
+                                network_type = NetworkType.disconnected
+                                update_location_no_service()
+                                if Event.LOCATION_STATUS in requested_event_list:
+                                    logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
+                                    data = bytearray()
+                                    data += EventList((Event.LOCATION_STATUS,), cr=True)
+                                    data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC, cr=True)
+                                    data += LocationStatus(status=0x02, cr=True)  # No service
+                                    await send_event(data)
+                                else:
+                                    logger.warning('SIM did not set up Location status in the event list')
+                        case 'connect':
+                            if network_type is not NetworkType.disconnected:
+                                print_screen('Already connected')
+                            else:
+                                print_screen('Connecting to network')
+                                await waiting_for_refresh.wait()
+                                network_type = NetworkType.eutran
+                                update_location_eutran(location)
+                                if Event.LOCATION_STATUS in requested_event_list:
+                                    logger.info('Sending ENVELOPE (EVENT DOWNLOAD - Location status)')
+                                    data = bytearray()
+                                    data += EventList((Event.LOCATION_STATUS,), cr=True)
+                                    data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC, cr=True)
+                                    data += LocationStatus(status=0x00, cr=True)  # Service available
+                                    data += LocalInformation(location.mcc_mnc + bytes.fromhex(location.tac) + location.eci, cr=True)  # E-UTRAN
+                                    await send_event(data)
+                                else:
+                                    logger.warning('SIM did not set up Location status in the event list')
+                case 'poll':
+                    if not is_thales:
+                        print_screen('Not a Thales eUICC')
+                    else:
+                        if force_polling(cla_ipae):
+                            print_screen('Force polling success')
+                        else:
+                            print_screen('Force polling failed; APDU polling is disabled or the IPAe is busy')
 
         cli_line_processed_event.set()
 
@@ -1610,6 +1702,7 @@ cla_isdr: int|None = None
 is_sgp22 = False
 is_sgp32 = False
 profile_switch_requested: bytes|None = None
+network_reject_scheduled: bool = False
 
 pin_names = {0x01: 'PIN1', 0x02: 'PIN2', 0x03: 'PIN3', 0x04: 'PIN4',
              0x05: 'PIN5', 0x06: 'PIN6', 0x07: 'PIN7', 0x08: 'PIN8',
@@ -1620,12 +1713,14 @@ pin_names = {0x01: 'PIN1', 0x02: 'PIN2', 0x03: 'PIN3', 0x04: 'PIN4',
              0x8C: 'ADM8', 0x8D: 'ADM9', 0x8E: 'ADM10'}
 
 async def main():
-    global negotiated_poll_interval, is_thales, cla_ipae, cla_isdr, has_5g, is_sgp22, is_sgp32, profile_switch_requested
+    global negotiated_poll_interval, is_thales, cla_ipae, cla_isdr, has_5g, is_sgp22, is_sgp32, profile_switch_requested, network_type, network_reject_scheduled
 
     asyncio.get_running_loop().set_exception_handler(exc_handler)
 
     cli_process_task = None
     cli_input_task = None
+    currently_active_profile = None
+    profile_changed = False
 
     while True:
         card_reset_event.clear()
@@ -1648,15 +1743,26 @@ async def main():
                 get_profiles(cla_isdr)
             except BaseException as e:
                 logger.error('Exception when listing profiles', exc_info=e)
+            newly_active_profile = None
+            for profile in profiles:
+                if profile.enabled:
+                    newly_active_profile = profile.iccid
+                    break
+            if newly_active_profile is not None and currently_active_profile is not None and currently_active_profile != newly_active_profile:
+                profile_changed = True
+            currently_active_profile = newly_active_profile
             if is_sgp32:
                 enable_ipae(cla_isdr)
                 try:
                     select_ipae(cla_ipae)  # Thales only
                     logger.info('Thales SIM detected')
                     is_thales = True
-                    get_ipae_version(cla_ipae)
-                except APDUException:
+                except APDUException as e:
                     logger.warning('Not a Thales SIM')
+                try:
+                    get_ipae_version(cla_ipae)
+                except APDUException as e:
+                    logger.warning('IPAe busy')
 
         except APDUException:
             logger.error('SIM does not appear to be a SGP.22/SGP.32 eUICC')
@@ -1720,7 +1826,17 @@ async def main():
             has_5g = True
 
         try:
-            update_location_eutran(location)
+            if network_reject_scheduled and profile_changed:
+                network_type = NetworkType.disconnected
+                update_location_no_service()
+            else:
+                match network_type:
+                    case NetworkType.eutran:
+                        update_location_eutran(location)
+                    case NetworkType.disconnected:
+                        update_location_no_service()
+                    case _:
+                        logger.error('Unhandled network type')
         except BaseException as e:
             logger.error('Error updating location information, 4G not available?', exc_info=e)
 
@@ -1738,6 +1854,20 @@ async def main():
             logger.warning('Card did not set up a poll interval! Using 30s as default')
             negotiated_poll_interval = 30
 
+        if network_reject_scheduled and profile_changed:
+            network_reject_scheduled = False
+            if Event.NETWORK_REJECTION not in requested_event_list:
+                logger.error('NETWORK REJECTION not in event list')
+            else:
+                logger.info('Sending a network rejection event')
+                data = bytearray()
+                data += EventList([Event.NETWORK_REJECTION], cr=False)
+                data += DeviceIdentities(source=DeviceIdentity.NETWORK, destination=DeviceIdentity.UICC, cr=False)
+                data += TrackingAreaIdentification(location.tai, cr=False)
+                data += AccessTechnology([ACT.EUTRAN], cr=False)
+                data += UpdateAttachRegistrationType(type=RegistrationType.EPS_ATTACH, cr=False)
+                data += RejectionCauseCode(code=RegistrationRejectionCode.PLMN_NOT_ALLOWED, cr=False)
+                await send_event(data)
 
         polling_task = asyncio.create_task(poll())
         refresh_task = asyncio.create_task(do_refresh())
@@ -1769,7 +1899,6 @@ def exc_handler(loop, context):
     if exc is not None:
         Path('error.log').write_text('\n'.join(traceback.format_exception(exc)))
     logger.error('Exception: %s', context['message'], **kw)
-    loop.default_exception_handler(context)
 
 
 main_window: curses.window|None = None
