@@ -39,7 +39,13 @@ parser.add_argument('-p', '--pin', default=None, help='PIN code')
 parser.add_argument('--network', choices=('none', '2G', '3G', '4G', '5G'), default='4G', help='Network type (default %(default)s; choices %(choices)s)')
 parser.add_argument('-r', '--reader', metavar='N', default='auto', help='Reader index or name (default %(default)s, give the value \'list\' to list readers)')
 parser.add_argument('-d', '--debug', action='store_true', help='Show debug messages')
+parser.add_argument('--dns-server', default='8.8.8.8', help='DNS server address to give to the SIM when requested (default %(default)s)')
 args = parser.parse_args()
+
+try:
+    socket.inet_aton(args.dns_server)
+except OSError:
+    sys.exit(f'Invalid DNS server address {args.dns_server!r}, an IPv4 is required')
 
 if args.pin is not None and len(args.pin) > 8:
     sys.exit('PIN is too long, maximum 8 characters')
@@ -865,6 +871,8 @@ def process_proactive_command(ret: bytes):
             case Command.SET_UP_EVENT_LIST:
                 logger.info('processing SET UP EVENT LIST')
                 requested_event_list = [*tags[EventList].data]
+                for event in requested_event_list:
+                    logger.info('Requested event: %s', Event(event).name)
                 data = bytearray()
                 data += tags[CommandDetails]
                 data += DeviceIdentities(source=DeviceIdentity.TERMINAL, destination=DeviceIdentity.UICC)
@@ -1024,8 +1032,8 @@ def process_proactive_command(ret: bytes):
 
                 # DNS server address
                 if dns_requested:
-                    logger.info('SIM is requesting DNS server address')
-                    data += DnsServerAddress(address_type=0x21, address=b'\x01\x01\x01\x01')
+                    logger.info('SIM is requesting DNS server address, sending %s', args.dns_server)
+                    data += DnsServerAddress(address_type=0x21, address=socket.inet_aton(args.dns_server))
 
                 sc.transmit(cla=0x80, ins=0x14, p1=0x00, p2=0x00, data=data)
             case Command.CLOSE_CHANNEL:

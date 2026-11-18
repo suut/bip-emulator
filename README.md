@@ -1,15 +1,63 @@
-BIP modem emulator for eUICC testing
+BIP modem emulator for SGP.32 eUICC testing
 ------------
 
 The main intent is for testing SGP.32 eUICCs (eSIMs) with an embedded IoT Profile Agent (IPAe). SGP.32 is the IoT counterpart to the usual SGP.22 consumer eSIM standard.
 
 Instead of the terminal equipment scanning an activation QRCode then talking to the operator's server in order to retrieve the profile, a SGP.32 eUICC with IPAe will do that on its own as long as the modem provides the adequate SIMToolkit/Card Application Toolkit/USIM Application Toolkit functionality.
 
-This program emulates a cellular modem using a real SIM card, and provides all the necessary CAT/USAT functions expected by the SIM, including Bearer Independent Protocol channels so the SIM can get internet access.
+This program emulates a cellular modem using a real SIM card, and provides all the necessary CAT/USAT functions expected by the SIM, including Bearer Independent Protocol channels (TCP/UDP and IPv4/IPVv6) so the SIM can get internet access.
+
+The SIM card under test must be inserted in a smartcard reader and connected to the computer. Any CCID reader should work; ACS ACR39T is a good one if you need a recommendation.
 
 This program uses a TUI (Terminal User Interface). The screen is split in two: the top part is the output log, and the bottom part is the input field for the command-line.
 
 [![Screenshot of the program](/docs/bip-emulator.png)](/docs/bip-emulator.png)
+
+Table of contents:
+* [About SGP.32](#about-sgp32)
+* [Supported USAT proactive features](#supported-usat-proactive-features)
+* [Program startup flow](#program-startup-flow)
+* [Command-line arguments](#command-line-arguments)
+* [Commands description](#commands-description)
+
+## About SGP.32
+
+SGP.32 is the IoT eSIM version of the consumer SGP.22 eSIM standard.
+
+Within SGP.22 the terminal equipment (i.e. the phone) is running a Local Profile Agent which manages the eSIM profiles as requested by the user, and installs new profiles when the user scans a QRCode or enters an activation code. When the user wants to install a new profile, the LPA is contacting the operator servers (SM-DP) to download the new profiles on behalf of the SIM, then loads the profile into the SIM, and switches to the new profile when requested by the user.
+
+On the other hand SGP.32 is made for IoT and other headless installations. There is a new component called an eIM which is a server that the SIM will connect to in order to know which actions to take (download a profile, switch profiles, change configuration, etc.).
+
+And another innovation (although it was already technically possible with SGP.22 but nobody bothered to implement it) is the IoT Profile Agent (the new name of the LPA) embedded into the SIM itself. Having specific eSIM code in the terminal equipment is not necessary anymore, and the SIM can be managed remotely even if the device has no idea about eSIMs, as long as the modem supports BIP.
+
+Not all SGP.32 eUICCs implement an IPAe (embedded IPA); some of them still require an IPAd (device IPA). Then the flow is similar to SGP.22, except that the IPAd will get its instructions from the eIM instead of from the user.
+
+Theoretically SGP.32 does remove the possibility to locally manage profiles, i.e. being able to directly enable or disable a profile from the local APDU interface. In practice, manufacturers of SGP.32 eUICCs will still support these SGP.22 commands as it is a frequent ask by customers.
+
+This application is made for testing SGP.32 with IPAe, as such it does not implement a full IPAd, it is only able to query the eUICC info, query the list of profiles, and enable or disable profiles.
+
+## Supported USAT proactive features
+
+The following proactive commands are understood by the emulator:
+* POLL INTERVAL, to negotiate the interval at which to send a STATUS to the card to poll for proactive commands 
+* SET UP EVENT LIST, with the following events being sent when relevant:
+  * *Location status* when connecting or disconnecting the network
+  * *Network Rejection* when triggered by the user, either immediately or after a profile switch
+  * *Data available* when new data arrived on the socket of a BIP channel
+  * *Channel status* when the TCP socket of a BIP channel is closed by the remote host
+* TIMER MANAGEMENT, with the TIMER EXPIRATION envelope command being sent when a timer expires
+  * Start timer
+  * Deactivate timer
+  * Get current timer value
+* PROVIDE LOCAL INFORMATION
+  * Code 00 for location information (current operator, current cell tower)
+  * Code 01 for the IMEI
+* OPEN CHANNEL, to open a BIP channel
+* CLOSE CHANNEL, to close an open BIP channel
+* WRITE DATA, to write data to the socket of a BIP channel
+* READ DATA, to read data from the socket of a BIP channel
+* REFRESH
+  * Refresh reasons *UICC reset* (04) and *eUICC Profile State Change* (09) both trigger a UICC reset
 
 ## Program startup flow
 
@@ -41,8 +89,8 @@ stateDiagram-v2
     UpdateNetworkLocation: update the current network location in the USIM files
     SendTerminalProfile: send the USAT terminal profile
     InitializeUSAT: initialize USAT (timers, polling interval, IMEI, ...)
-    SendNetworkRejection: send a scheduled network rejection event
-    ProcessCardCommands: process user CLI commands and SIM card proactive commands
+    SendNetworkRejection: send a network rejection event
+    ProcessCardCommands: process user commands and SIM card proactive commands
 ```
 
 ## Command-line arguments
@@ -53,8 +101,9 @@ stateDiagram-v2
 * `-p, --pin`: PIN code of the SIM/profile (warning: on an eUICC the same PIN will be used to unlock all profiles that require a PIN code; disable the PIN code first if that is not what you want)
 * `-n, --network`: one of `none`, `2G`, `3G`, `4G`, `5G`; initial network attachment state
 * `-r, --reader`: index of the smartcard reader to use, or `list` for a list of readers, or `auto` for auto-selection.
+* `--dns-server`: DNS server address to give to the SIM when requested, the default is 8.8.8.8
 
-## Command descriptions
+## Commands description
 
 The commands are:
 * [exit](#exit)
