@@ -144,7 +144,7 @@ This prints the currently attached network, which is one of:
 
 The support for the various network types depends on the SIM card and the currently activated profile for an eUICC; not all SIM cards do support 5G for instance.
 
-The operator (MCC and MNC) as well as the currently attached cell is also printed if the network is not disconnect. 
+The operator (MCC and MNC) as well as the currently attached cell is also printed if the network is not disconnected. 
 
 #### `network connect`
 
